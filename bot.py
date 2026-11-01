@@ -134,7 +134,7 @@ def run_deterministic_audit(data: dict) -> str:
     
     for m in markets:
         real_prob = m["prob"]
-        real_prob_min = real_prob - 0.03  # Анти-галлюцинационный буфер -3%
+        real_prob_min = real_prob - 0.03
         impl_prob = 1.0 / m["k"]
         value_margin_min = (real_prob_min - impl_prob) * 100
         
@@ -167,7 +167,7 @@ def run_deterministic_audit(data: dict) -> str:
     output.append(f"\n🚨 **ИТОГОВЫЙ ПРИКАЗ ПО СТАВКЕ:**")
     if best_plan == "A":
         final_cmd = f"{match_name} | {best_market['name']} — {best_market['k']:.2f} — {bank_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {status_str}]"
-    el
+    else:
         final_cmd = f"{match_name} | Основная ставка отсутствует, зафиксирован валуй (План Б): {best_market['name']} — {best_market['k']:.2f} — {bank_pct}% от банка | [СТАТУС: РАБОЧИЙ ВАЛУЙ (План Б)]"
         
     output.append(f"`{final_cmd}`")
