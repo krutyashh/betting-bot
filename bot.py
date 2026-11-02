@@ -80,9 +80,10 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         zone_items = []
         for e in elements:
             if y_start <= e['y'] < y_end:
-                clean_t = e['text'].replace(',', '.')
-                # \d{1,2} захватывает и .0 (например, 12.0), и .25, и .80
-                found_nums = re.findall(r'\b\d{1,3}\.\d{1,2}\b', clean_t)
+                # Всевозможные варианты разделителей дроби от OCR заменяем на точку, убираем пробелы
+                clean_t = e['text'].replace(',', '.').replace('․', '.').replace('·', '.').replace(' ', '')
+                # Гибкий поиск чисел с плавающей точкой (без строгих границ \b)
+                found_nums = re.findall(r'\d{1,3}\.\d{1,2}', clean_t)
                 for num_str in found_nums:
                     try:
                         val = float(num_str)
