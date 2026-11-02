@@ -154,7 +154,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     for e in elements:
         if e['y'] > y_1x2:
             raw_txt = e['text'].replace(',', '.').replace(' ', '')
-            # Ищем числа со знаками + или - и обязательным или опциональным .5 / целым значением
             if re.search(r'[-+]\d+(\.\d+)?', raw_txt):
                 try:
                     match_num = re.search(r'([-+]\d+(\.\d+)?)', raw_txt)
@@ -218,10 +217,11 @@ def execute_v31_audit(data: dict) -> str:
     xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
     xG_2 = max(0.3, xG_total - xG_1)
 
-    grid = np.zeros((8, 8))
+    # РАСШИРЕНИЕ МАТРИЦЫ ПУАССОНА ДО 10x10 (устранение просадки хвоста при высоком xG)
+    grid = np.zeros((10, 10))
     score_probs = []
-    for i in range(8):
-        for j in range(8):
+    for i in range(10):
+        for j in range(10):
             prob = poisson.pmf(i, xG_1) * poisson.pmf(j, xG_2) * 100
             grid[i, j] = prob
             score_probs.append(((i, j), prob))
@@ -245,9 +245,9 @@ def execute_v31_audit(data: dict) -> str:
         return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Причина: Нарушен каскадный лимит матрицы Пуассона]"
 
     markets_to_test = [
-        {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i > j)},
-        {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i == j)},
-        {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i < j)},
+        {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i > j)},
+        {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i == j)},
+        {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i < j)},
     ]
 
     for t_item in data.get("scanned_totals", []):
@@ -257,12 +257,12 @@ def execute_v31_audit(data: dict) -> str:
         markets_to_test.append({
             "name": f"Тотал меньше ({line})", 
             "odds": k_tu, 
-            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (i + j) < line)
+            "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) < line)
         })
         markets_to_test.append({
             "name": f"Тотал больше ({line})", 
             "odds": k_tb, 
-            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (i + j) > line)
+            "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) > line)
         })
 
     for h_item in data.get("scanned_handicaps", []):
@@ -270,23 +270,30 @@ def execute_v31_audit(data: dict) -> str:
         markets_to_test.append({
             "name": f"Фора 1 ({h_val:+.1f})", 
             "odds": h_item["h1"], 
-            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (i - j) > -h_val)
+            "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h_val)
         })
         markets_to_test.append({
             "name": f"Фора 2 ({-h_val:+.1f})", 
             "odds": h_item["h2"], 
-            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (j - i) > h_val)
+            "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > h_val)
         })
 
     best_pick = None
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
+    vector_lock = "Верховой" if data["k_tb25"] and data["k_tb25"] < 1.75 else "Стандартный"
+
     for m in markets_to_test:
         odds = m["odds"]
         
-        # ЗАЩИТНЫЙ ФИЛЬТР: Отсекаем дикие коэффициенты-ловушки выше 5.50
+        # ЗАЩИТНЫЙ ФИЛЬТР 1: Отсекаем дикие коэффициенты-ловушки выше 5.50
         if odds > 5.50:
+            continue
+
+        # ЗАЩИТНЫЙ ФИЛЬТР 2 (Vector Lock Enforcement): Предотвращаем конфликт логики.
+        # Если матч явно верховой и фаворит идет ниже 1.25, запрещаем ставить на плюсовые форы аутсайдера.
+        if vector_lock == "Верховой" and k1 < 1.25 and "Фора 2" in m["name"] and "+" in m["name"]:
             continue
 
         real_prob = m["real_prob"]
@@ -314,13 +321,11 @@ def execute_v31_audit(data: dict) -> str:
         form_bonus = (wins_count - losses_count) * 2
 
     if not best_pick:
-        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков]"
+        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вектора]"
 
     market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
     confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
     stake_pct = 5 if confidence >= 80 else 3
-
-    vector_lock = "Верховой" if data["k_tb25"] and data["k_tb25"] < 1.75 else "Стандартный"
 
     totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data["scanned_totals"]]) if data["scanned_totals"] else "Не найдены"
     hc_str = ", ".join([f"{h['line']:+.1f} (к1:{h['h1']}/к2:{h['h2']})" for h in data["scanned_handicaps"]]) if data["scanned_handicaps"] else "Не найдены"
