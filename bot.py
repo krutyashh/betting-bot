@@ -83,7 +83,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         for e in elements:
             if y_start <= e['y'] < y_end:
                 clean_t = e['text'].replace(',', '.')
-                found_nums = re.findall(r'\b\d{1,3}\.\d{2}\b', clean_t)
+                # ИСПРАВЛЕНИЕ: \d{1,2} захватывает и .0 (например, 12.0), и .25, и .80
+                found_nums = re.findall(r'\b\d{1,3}\.\d{1,2}\b', clean_t)
                 for num_str in found_nums:
                     try:
                         val = float(num_str)
@@ -123,7 +124,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
     print("----------------------------------------------------------------------------")
     print(f"✅ [ИТОГ ПАРСИНГА] Матч: '{match_title}' | 1X2: [{k_p1}, {k_x}, {k_p2}] | ТМ2.5: {k_tu25} | ТБ2.5: {k_tb25}")
-    print("================ [OCR DEBUG: УСПЕШНО ЗАВЕРШЕНО] ================\n")
+    print("================ [OCR DEBUG: УСПЕШНО ЗАВЕРШЕНО] ===============-\n")
 
     return {
         "match": match_title,
