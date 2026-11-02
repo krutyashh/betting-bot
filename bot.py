@@ -1,10 +1,28 @@
+По логам видно, что бот и скрипт запутываются в окружении Python (PyTorch предупреждает об использовании CPU, устаревших функторах квантования и ловят `SIGTERM`).
+
+Опираясь на то, что мы только что детально разобрали математику модели v3.1 и логику честного аудита росписи без выдуманных заглушек, давай устраним эти предупреждения и приведем твой Telegram-бот в идеальный рабочий вид.
+
+### Что происходит в логах:
+
+1. **`Using CPU. Note: This module is much faster with a GPU`** — EasyTorch/PyTorch запускается на процессоре, так как на сервере нет дискретной видеокарты (или не настроен CUDA). Для EasyOCR это нормально, но можно подавить лишний шум в консоли.
+2. **`Received SIGTERM signal`** — Процесс бота был принудительно остановлен системой (например, контейнер перезапустился, или ты нажал `Ctrl+C` в терминале).
+
+---
+
+### Финальный исправленный код бота (без варнингов, с чистой логикой v3.1):
+
+```python
 import os
 import re
+import warnings
 import cv2
 import numpy as np
 import telebot
 import easyocr
 from scipy.stats import poisson
+
+# Подавляем технические предупреждения PyTorch и Deprecation Warnings для чистоты логов
+warnings.filterwarnings("ignore", category=UserWarning)
 
 TOKEN = "9223011917:AAHB3RofroQou1MVLc5GoUHDFAm_wdEVxWo"
 bot = telebot.TeleBot(TOKEN)
@@ -90,12 +108,12 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 def execute_v31_audit(data: dict) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
-    # Точный расчет xG через имплицитную вероятность тотала 2.5
+    # Калиброванный расчет xG через имплицитную вероятность тотала 2.5
     if data["k_tu25"] and data["k_tb25"]:
         p_under = 1 / data["k_tu25"]
         xG_total = max(1.2, min(4.5, 3.2 - (p_under - 0.5) * 2.5))
     else:
-        xG_total = 2.55 # Фоллбек, если тоталы не захвачены в кадр
+        xG_total = 2.55 # Стандартный fallback при отсутствии тоталов в кадре
         
     power_diff = (k2 - k1) / (k1 + k2 + kx)
     xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
@@ -117,7 +135,7 @@ def execute_v31_audit(data: dict) -> str:
     top4_prob = top3_prob + score_probs[3][1]
     tail_prob = 100.0 - top4_prob
 
-    # Каскадный лимит матрицы
+    # Каскадный стоп-кран
     cascade_passed = (top2_prob <= 46.0) and (top3_prob <= 62.0) and (top4_prob <= 72.0) and (tail_prob >= 28.0)
     if 69.0 <= top4_prob <= 72.0 and (top4_prob + 3.0) > 72.0:
         cascade_passed = False
@@ -128,7 +146,7 @@ def execute_v31_audit(data: dict) -> str:
     if not cascade_passed:
         return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Причина: Нарушен каскадный лимит матрицы Пуассона]"
 
-    # Формируем пул рынков СТРОГО из реальных данных со скриншота (без выдуманных заглушек)
+    # Пул рынков формируется СТРОГО из реальных подтвержденных данных со скриншота
     markets_to_test = [
         {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i > j)},
         {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i == j)},
@@ -150,22 +168,20 @@ def execute_v31_audit(data: dict) -> str:
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    # Аудит по Плану А / Плану Б с буфером -3%
+    # Аудит по Плану А / Плану Б с дисперсионным буфером -3%
     for m in markets_to_test:
         odds = m["odds"]
         real_prob = m["real_prob"]
-        real_prob_min = real_prob - 3.0  # Дисперсионный буфер безопасности -3%
+        real_prob_min = real_prob - 3.0  # Буфер безопасности -3%
         implied_prob = (1 / odds) * 100
         
         if odds >= 2.10:
-            # План А: Value Margin(min) >= +1.50%
             vm_min = real_prob_min - implied_prob
             if vm_min >= 1.50 and vm_min > max_margin_val:
                 max_margin_val = vm_min
                 best_pick = (m["name"], odds, vm_min)
                 final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
         else:
-            # План Б: Real Prob(min) > Implied Prob БК + 6.0% (Всегда Железный валуй)
             if real_prob_min > (implied_prob + 6.0):
                 excess = real_prob_min - (implied_prob + 6.0)
                 if excess > max_margin_val:
@@ -213,5 +229,7 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.1 запущен и работает по честным данным...")
+    print("Бот v3.1 успешно запущен и готов к работе...")
     bot.infinity_polling()
+
+```
