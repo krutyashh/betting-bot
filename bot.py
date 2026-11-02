@@ -149,41 +149,41 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 except ValueError:
                     continue
 
-    # Универсальный сканер фор по паттерну
+    # Универсальный сканер фор по паттерну (исправлен захват точных дробных значений с .5)
     scanned_handicaps = []
     for e in elements:
         if e['y'] > y_1x2:
-            clean_t = e['text'].replace(',', '.').replace(' ', '').replace('+', '').replace('-', '')
-            if re.match(r'^[0-9](\.[05])?$', clean_t) and ('+' in e['text'] or '-' in e['text']):
+            raw_txt = e['text'].replace(',', '.').replace(' ', '')
+            # Ищем числа со знаками + или - и обязательным или опциональным .5 / целым значением
+            if re.search(r'[-+]\d+(\.\d+)?', raw_txt):
                 try:
-                    raw_txt = e['text']
-                    sign = -1 if '-' in raw_txt else 1
-                    h_val = float(re.findall(r'\d+\.?\d*', raw_txt)[0]) * sign
-                    
-                    row_odds = []
-                    for item in elements:
-                        if abs(item['y'] - e['y']) <= 12:
-                            c_text = item['text'].replace(',', '.').replace(' ', '')
-                            found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                            for f_num in found:
-                                try:
-                                    val = float(f_num)
-                                    if val == abs(h_val) and abs(item['x'] - e['x']) < 15:
+                    match_num = re.search(r'([-+]\d+(\.\d+)?)', raw_txt)
+                    if match_num:
+                        h_val = float(match_num.group(1))
+                        row_odds = []
+                        for item in elements:
+                            if abs(item['y'] - e['y']) <= 12:
+                                c_text = item['text'].replace(',', '.').replace(' ', '')
+                                found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                                for f_num in found:
+                                    try:
+                                        val = float(f_num)
+                                        if val == abs(h_val) and abs(item['x'] - e['x']) < 15:
+                                            continue
+                                        if 1.01 <= val <= 50.0:
+                                            row_odds.append((item['x'], val))
+                                    except ValueError:
                                         continue
-                                    if 1.01 <= val <= 50.0:
-                                        row_odds.append((item['x'], val))
-                                except ValueError:
-                                    continue
-                    row_odds.sort(key=lambda x: x[0])
-                    left_vals = [v[1] for v in row_odds if v[0] < e['x']]
-                    right_vals = [v[1] for v in row_odds if v[0] > e['x']]
-                    if left_vals and right_vals:
-                        if not any(h['line'] == h_val for h in scanned_handicaps):
-                            scanned_handicaps.append({
-                                "line": h_val,
-                                "h1": left_vals[-1],
-                                "h2": right_vals[0]
-                            })
+                        row_odds.sort(key=lambda x: x[0])
+                        left_vals = [v[1] for v in row_odds if v[0] < e['x']]
+                        right_vals = [v[1] for v in row_odds if v[0] > e['x']]
+                        if left_vals and right_vals:
+                            if not any(h['line'] == h_val for h in scanned_handicaps):
+                                scanned_handicaps.append({
+                                    "line": h_val,
+                                    "h1": left_vals[-1],
+                                    "h2": right_vals[0]
+                                })
                 except (ValueError, IndexError):
                     continue
 
@@ -284,6 +284,11 @@ def execute_v31_audit(data: dict) -> str:
 
     for m in markets_to_test:
         odds = m["odds"]
+        
+        # ЗАЩИТНЫЙ ФИЛЬТР: Отсекаем дикие коэффициенты-ловушки выше 5.50
+        if odds > 5.50:
+            continue
+
         real_prob = m["real_prob"]
         real_prob_min = real_prob - 3.0
         implied_prob = (1 / odds) * 100
