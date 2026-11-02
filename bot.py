@@ -55,7 +55,11 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
-    # СТАБИЛИЗИРОВАННЫЙ СКАНЕР ФОРМЫ (Только русские буквы + латинские эквиваленты V, H, N, P без лишних W/D/L/B)
+    # ==========================================
+    # ДЕБАГ-ЛОГИРОВАНИЕ ЗОНЫ ФОРМЫ КОМАНД
+    # ==========================================
+    print(f"\n--- [DEBUG OCR] Анализ формы для матча: {match_title} ---")
+    
     form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P']
     t1_form_raw = []
     t2_form_raw = []
@@ -63,6 +67,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     for e in elements:
         # Узкая зона поиска по вертикали под логотипами команд
         if 180 <= e['y'] <= 300:
+            print(f"  [ЗОНА ФОРМЫ] y={e['y']}, x={e['x']}, текст: '{e['text']}'")
             txt = e['text'].upper().strip()
             for char in txt:
                 if char in form_allowed_chars:
@@ -70,14 +75,18 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     if clean_char in ['В', 'Н', 'П']:
                         if e['x'] < screen_center_x:
                             t1_form_raw.append({'x': e['x'], 'char': clean_char})
+                            print(f"    -> Зачтено в форму Т1: '{clean_char}' (x={e['x']})")
                         else:
                             t2_form_raw.append({'x': e['x'], 'char': clean_char})
+                            print(f"    -> Зачтено в форму Т2: '{clean_char}' (x={e['x']})")
 
     t1_form_raw.sort(key=lambda item: item['x'])
     t2_form_raw.sort(key=lambda item: item['x'])
 
     t1_form = [item['char'] for item in t1_form_raw][-5:]
     t2_form = [item['char'] for item in t2_form_raw][-5:]
+
+    print(f"  [РЕЗУЛЬТАТ ФОРМЫ] Т1: {t1_form} | Т2: {t2_form}\n---------------------------------------------------")
 
     if len(t1_form) >= 3 and len(t2_form) >= 3:
         form_tokens = t1_form + t2_form
@@ -159,12 +168,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     # СТАРТ ПОИСКА ФОР: сразу ниже блока 1X2, независимо от тоталов
     y_handicap_start = y_1x2 + 40
 
-    # Сканер фор (Требует знака + / - или строгого нуля)
+    # Сканер фор (Улучшен для надежного распознавания нулевой форы и защиты от OCR-артефактов)
     scanned_handicaps = []
     for e in elements:
         if e['y'] > y_handicap_start:
-            raw_txt = e['text'].replace(',', '.').replace(' ', '').rstrip('+')
-            if re.match(r'^([-+]\d+(\.\d+)?|0(\.0)?)$', raw_txt):
+            raw_txt = e['text'].upper().replace('O', '0').replace('О', '0').replace(',', '.').replace(' ', '').rstrip('+')
+            # Расширенное условие для точного захвата плюс/минус знаков, нуля и десятичных дробей
+            if re.match(r'^([-+]?\d+(\.\d+)?|0(\.0)?)$', raw_txt) or raw_txt in ['0', '0.0', '0.00']:
                 try:
                     match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
                     if match_num:
@@ -400,7 +410,6 @@ def execute_v31_audit(data: dict) -> str:
             real_prob = m["real_prob"]
             
             # ДИНАМИЧЕСКИЙ ШТРАФ ПОГРЕШНОСТИ вместо статических 3.0%
-            # Чем выше вероятность (ниже кэф), тем меньше штраф; для редких исходов штраф строже
             dynamic_penalty = max(1.5, min(4.5, (100 - real_prob) * 0.04))
             real_prob_min = real_prob - dynamic_penalty
             
