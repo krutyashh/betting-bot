@@ -37,24 +37,24 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         clean_txt = text.strip()
         elements.append({'y': y_min, 'x': x_min, 'text': clean_txt})
         
-        # Форма команд
+        # Форма команд (буквы В, Н, П, W, D, L в кружках под логотипами)
         if clean_txt.upper() in ['В', 'Н', 'П', 'W', 'D', 'L'] and len(clean_txt) == 1:
             form_tokens.append(clean_txt.upper())
 
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
-    # Определение названия матча
+    # ТОЧНОЕ ОПРЕДЕЛЕНИЕ НАЗВАНИЯ МАТЧА (Ищем строку с тире строго в верхней зоне матча, исключая время приложения)
     match_title = "Команда 1 — Команда 2"
     for e in elements:
-        if re.search(r'[-—–]', e['text']) and len(e['text']) > 5 and e['y'] < 350:
+        if re.search(r'[-—–]', e['text']) and len(e['text']) > 5 and 130 <= e['y'] <= 250:
             match_title = e['text']
             break
             
     if match_title == "Команда 1 — Команда 2":
         team_candidates = []
         for e in elements:
-            if e['y'] < 300:
+            if 130 <= e['y'] <= 250:
                 txt = e['text']
                 if not re.search(r'(тур|часть|сегодня|вчера|\d{2}:\d{2})', txt.lower()) and len(txt) > 2:
                     team_candidates.append(txt)
@@ -79,7 +79,11 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Откройте основную роспись матча.")
         
     y_1x2 = anchors['1x2']
-    
+    y_total = anchors.get('total', y_1x2 + 120)
+    y_hc = anchors.get('handicap', y_total + 220)
+    y_combo = anchors.get('combo', y_hc + 220)
+    max_y = max([e['y'] for e in elements]) + 100 if elements else 1000
+
     # Универсальная функция извлечения коэффициентов
     def extract_odds_in_zone(y_start, y_end):
         zone_items = []
@@ -97,8 +101,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         zone_items.sort(key=lambda item: item[0])
         return [item[1] for item in zone_items]
 
-    max_y = max([e['y'] for e in elements]) + 100 if elements else 1000
-
     # 3. Извлекаем блоки по зонам
     odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 100)
     if len(odds_1x2) < 3:
@@ -106,55 +108,55 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    y_total = anchors.get('total', y_1x2 + 120)
-    y_hc = anchors.get('handicap', y_total + 200)
-    y_combo = anchors.get('combo', y_hc + 200)
-
     all_x = [e['x'] for e in elements]
     screen_center_x = (min(all_x) + max(all_x)) / 2 if all_x else 200
 
-    # Сканер тоталов
+    # СУПЕР-ТОЧНЫЙ СКАЛЕР ТОТАЛОВ (Ищет маркеры вида 2.5, 3.5 строго в зоне тоталов)
     scanned_totals = []
     for e in elements:
         if y_total <= e['y'] < y_hc:
             clean_t = e['text'].replace(',', '.').replace(' ', '')
-            if re.match(r'^[0-5]\.[05]$', clean_t) and abs(e['x'] - screen_center_x) < 100:
-                line_val = float(clean_t)
-                row_odds = []
-                for item in elements:
-                    if abs(item['y'] - e['y']) <= 15:
-                        c_text = item['text'].replace(',', '.').replace(' ', '')
-                        found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                        for f_num in found:
-                            try:
-                                val = float(f_num)
-                                if val == line_val and abs(item['x'] - e['x']) < 15:
+            if re.match(r'^[0-5]\.[05]$', clean_t):
+                try:
+                    line_val = float(clean_t)
+                    if not (0.5 <= line_val <= 10.5): continue
+                    row_odds = []
+                    for item in elements:
+                        if abs(item['y'] - e['y']) <= 14:
+                            c_text = item['text'].replace(',', '.').replace(' ', '')
+                            found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                            for f_num in found:
+                                try:
+                                    val = float(f_num)
+                                    if val == line_val and abs(item['x'] - e['x']) < 15:
+                                        continue
+                                    if 1.01 <= val <= 50.0:
+                                        row_odds.append((item['x'], val))
+                                except ValueError:
                                     continue
-                                if 1.01 <= val <= 50.0:
-                                    row_odds.append((item['x'], val))
-                            except ValueError:
-                                continue
-                row_odds.sort(key=lambda x: x[0])
-                left_vals = [v[1] for v in row_odds if v[0] < e['x']]
-                right_vals = [v[1] for v in row_odds if v[0] > e['x']]
-                if left_vals and right_vals:
-                    scanned_totals.append({
-                        "line": line_val,
-                        "tu": left_vals[-1],
-                        "tb": right_vals[0]
-                    })
+                    row_odds.sort(key=lambda x: x[0])
+                    left_vals = [v[1] for v in row_odds if v[0] < e['x']]
+                    right_vals = [v[1] for v in row_odds if v[0] > e['x']]
+                    if left_vals and right_vals:
+                        scanned_totals.append({
+                            "line": line_val,
+                            "tu": left_vals[-1],
+                            "tb": right_vals[0]
+                        })
+                except ValueError:
+                    continue
 
-    # Сканер фор с поддержкой знаков и целых/дробных значений
+    # СУПЕР-ТОЧНЫЙ СКАЛЕР ФОР (Ищет маркеры фор вида -2.5, +1.5 строго в зоне фор)
     scanned_handicaps = []
     for e in elements:
         if y_hc <= e['y'] < y_combo:
-            clean_t = e['text'].replace(',', '.').replace(' ', '')
-            if re.match(r'^[-+]?[0-9](\.[05])?$', clean_t):
+            clean_t = e['text'].replace(',', '.').replace(' ', '').replace('+', '')
+            if re.match(r'^[-+]?[0-9]\.[05]$', clean_t) or re.match(r'^[-+]?[0-9]$', clean_t):
                 try:
                     h_val = float(clean_t)
                     row_odds = []
                     for item in elements:
-                        if abs(item['y'] - e['y']) <= 15:
+                        if abs(item['y'] - e['y']) <= 14:
                             c_text = item['text'].replace(',', '.').replace(' ', '')
                             found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
                             for f_num in found:
@@ -314,12 +316,14 @@ def execute_v31_audit(data: dict) -> str:
 
     totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data["scanned_totals"]]) if data["scanned_totals"] else "Не найдены"
     hc_str = ", ".join([f"{h['line']:+.1f} (к1:{h['h1']}/к2:{h['h2']})" for h in data["scanned_handicaps"]]) if data["scanned_handicaps"] else "Не найдены"
+    form_str = ", ".join(data["form_tokens"]) if data["form_tokens"] else "Не считывались"
 
     report = f"""<b>Шаг 0: Калибровка и привязка котировок</b>
 - <b>Матч</b>: {t1} — {t2}
 - <b>1X2</b>: П1={k1}, Х={kx}, П2={k2}
 - <b>Тоталы (все линии)</b>: [{totals_str}]
 - <b>Форы (все линии)</b>: [{hc_str}]
+- <b>Форма команд</b>: [{form_str}] (Бонус: {form_bonus:+d}%)
 - xG: {t1} ({xG_1:.2f}) / {t2} ({xG_2:.2f}) | Сумма: {xG_total:.2f}
 - Вектор матча: {vector_lock}
 
