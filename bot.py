@@ -23,63 +23,86 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     
     results = reader.readtext(img, detail=1)
     
-    anchors = {}
+    elements = []
     match_title = "Не распознано"
     form_tokens = []
     
+    # 1. Собираем все элементы с их точными координатами
     for bbox, text, prob in results:
-        clean_txt = text.lower().strip()
-        if "1x2" in clean_txt or "исход" in clean_txt:
-            anchors['1x2'] = bbox[0][1]
-        elif "тотал" in clean_txt:
-            anchors['total'] = bbox[0][1]
-        elif "фора" in clean_txt:
-            anchors['handicap'] = bbox[0][1]
-        elif "комбинирован" in clean_txt or "исход и тотал" in clean_txt or "победа и" in clean_txt:
-            anchors['combo'] = bbox[0][1]
+        y_min = bbox[0][1]
+        x_min = bbox[0][0]
+        clean_txt = text.strip()
+        elements.append({'y': y_min, 'x': x_min, 'text': clean_txt})
+        
+        # Название матча (ищем в верхней части с дефисом)
+        if "-" in clean_txt and len(clean_txt) > 6 and y_min < 350:
+            match_title = clean_txt
             
-        if "-" in text and len(text) > 6 and bbox[0][1] < anchors.get('1x2', 500):
-            match_title = text.strip()
-            
-        if text.strip().upper() in ['В', 'Н', 'П', 'W', 'D', 'L'] and len(text.strip()) == 1:
-            form_tokens.append(text.strip().upper())
+        # Форма команд
+        if clean_txt.upper() in ['В', 'Н', 'П', 'W', 'D', 'L'] and len(clean_txt) == 1:
+            form_tokens.append(clean_txt.upper())
+
+    # Сортируем элементы сверху вниз
+    elements.sort(key=lambda e: e['y'])
+    
+    # 2. Ищем координаты ключевых заголовков (якорей блоков)
+    anchors = {}
+    for el in elements:
+        t_low = el['text'].lower()
+        if ('1x2' in t_low or 'исход' in t_low) and '1x2' not in anchors:
+            anchors['1x2'] = el['y']
+        elif 'тотал' in t_low and 'total' not in anchors and 'комбинирован' not in t_low:
+            anchors['total'] = el['y']
+        elif 'фора' in t_low and 'handicap' not in anchors:
+            anchors['handicap'] = el['y']
+        elif ('комбинирован' in t_low or 'исход и тотал' in t_low) and 'combo' not in anchors:
+            anchors['combo'] = el['y']
 
     if '1x2' not in anchors:
-        raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Убедитесь, что открыт нужный рынок матча.")
+        raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Откройте основную роспись матча.")
         
     y_1x2 = anchors['1x2']
-    y_total = anchors.get('total', y_1x2 + 200)
-    y_hc = anchors.get('handicap', y_total + 200)
-    y_combo = anchors.get('combo', y_hc + 200)
+    y_total = anchors.get('total', y_1x2 + 250)
+    y_hc = anchors.get('handicap', y_total + 250)
+    y_combo = anchors.get('combo', y_hc + 250)
     
+    # Универсальная функция извлечения чисел (коэффициентов) в заданном вертикальном диапазоне
     def extract_odds_in_zone(y_start, y_end):
-        collected = []
-        for bbox, text, prob in results:
-            y_coord = bbox[0][1]
-            if y_start <= y_coord < y_end:
-                clean_text = text.replace(',', '.')
-                found_nums = re.findall(r'\b\d{1,3}\.\d{2}\b', clean_text)
+        zone_items = []
+        for e in elements:
+            if y_start <= e['y'] < y_end:
+                clean_t = e['text'].replace(',', '.')
+                found_nums = re.findall(r'\b\d{1,3}\.\d{2}\b', clean_t)
                 for num_str in found_nums:
                     try:
                         val = float(num_str)
-                        if val > 1.0:
-                            collected.append(val)
+                        if 1.01 <= val <= 50.0:
+                            zone_items.append((e['x'], val))
                     except ValueError:
                         continue
-        return collected
+        # Сортируем слева направо по оси X
+        zone_items.sort(key=lambda item: item[0])
+        return [item[1] for item in zone_items]
 
-    odds_1x2 = extract_odds_in_zone(y_1x2, min(y_total, y_1x2 + 160))
+    # Нижняя граница с запасом для сбора всего экрана
+    max_y = max([e['y'] for e in elements]) + 100
+
+    # 3. Извлекаем блоки по зонам
+    odds_1x2 = extract_odds_in_zone(y_1x2, y_total)
     if len(odds_1x2) < 3:
         raise ValueError(f"Ошибка парсинга 1X2: найдено коэффициентов: {len(odds_1x2)}. Требуется ровно 3.")
-
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
-    
-    odds_totals = extract_odds_in_zone(y_total, y_total + 200) if 'total' in anchors else []
-    k_tu25 = odds_totals[2] if len(odds_totals) > 2 else None
-    k_tb25 = odds_totals[5] if len(odds_totals) > 5 else None
 
-    odds_handicaps = extract_odds_in_zone(y_hc, y_hc + 180) if 'handicap' in anchors else []
-    odds_combos = extract_odds_in_zone(y_combo, y_combo + 250) if 'combo' in anchors else []
+    # Тоталы (берем ТМ 2.5 и ТБ 2.5 из блока тоталов)
+    odds_totals = extract_odds_in_zone(y_total, y_hc)
+    k_tu25 = odds_totals[2] if len(odds_totals) > 2 else (odds_totals[0] if len(odds_totals) > 0 else None)
+    k_tb25 = odds_totals[5] if len(odds_totals) > 5 else (odds_totals[1] if len(odds_totals) > 1 else None)
+
+    # Форы (захватываем все котировки из зоны фор)
+    odds_handicaps = extract_odds_in_zone(y_hc, y_combo)
+
+    # Комбо-ставки (исход и тотал)
+    odds_combos = extract_odds_in_zone(y_combo, max_y)
 
     return {
         "match": match_title,
@@ -99,7 +122,7 @@ def execute_v31_audit(data: dict) -> str:
         p_under = 1 / data["k_tu25"]
         xG_total = max(1.2, min(4.5, 3.2 - (p_under - 0.5) * 2.5))
     else:
-        xG_total = 2.55 # Стандартный fallback при отсутствии тоталов в кадре
+        xG_total = 2.55  # Стандартный fallback при отсутствии тоталов в кадре
         
     power_diff = (k2 - k1) / (k1 + k2 + kx)
     xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
@@ -145,10 +168,10 @@ def execute_v31_audit(data: dict) -> str:
         markets_to_test.append({"name": "Тотал меньше (2.5)", "odds": data["k_tu25"], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (i + j) < 2.5)})
 
     if len(data["handicaps"]) >= 2:
-        markets_to_test.append({"name": "Фора 2 (-1.0)", "odds": data["handicaps"][1], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (j - i) >= 2)})
+        markets_to_test.append({"name": "Фора (по котировке)", "odds": data["handicaps"][-1], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i != j)})
 
     if len(data["combos"]) >= 1:
-        markets_to_test.append({"name": "П2 + ТБ(2.5) [Комбо]", "odds": data["combos"][0], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (j > i) and (i + j > 2.5))})
+        markets_to_test.append({"name": "Комбо-рынок (П1/ТМ или П1/ТБ)", "odds": data["combos"][0], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (i > j) and (i + j < 3.5))})
 
     best_pick = None
     max_margin_val = -999.0
