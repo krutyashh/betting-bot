@@ -8,7 +8,7 @@ import telebot
 import easyocr
 from scipy.stats import poisson
 
-# Подавляем технические предупреждения PyTorch и Deprecation Warnings для чистоты логов
+# Подавляем технические предупреждения PyTorch и Депрекационные варнинги для чистоты логов
 warnings.filterwarnings("ignore", category=UserWarning)
 
 TOKEN = "9223011917:AAF2aonZ5kaX9TkD7fx0kz6U2gFzc52Cx_Y"
@@ -55,43 +55,34 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
-    # СТАБИЛИЗИРОВАННЫЙ ПОИСК ФОРМЫ (Расширена зона Y до 350, погрешность строки до 15 пикселей)
-    potential_form_chars = ['В', 'Н', 'П', 'W', 'D', 'L', 'B']
-    form_header_elements = [e for e in elements if 40 <= e['y'] <= 350]
-    
-    rows = []
-    for e in form_header_elements:
-        txt_clean = e['text'].upper().strip()
-        if txt_clean in potential_form_chars and len(txt_clean) == 1:
-            placed = False
-            for row in rows:
-                if abs(row[0]['y'] - e['y']) <= 15:
-                    row.append(e)
-                    placed = True
-                    break
-            if not placed:
-                rows.append([e])
+    # СТАБИЛИЗИРОВАННЫЙ И ИНТЕЛЛЕКТУАЛЬНЫЙ СКАНЕР ФОРМЫ КОМАНД ПО КООРДИНАТАМ
+    potential_form_chars = ['В', 'Н', 'П', 'W', 'D', 'L', 'B', 'X']
+    t1_form_raw = []
+    t2_form_raw = []
 
-    t1_form = []
-    t2_form = []
+    for e in elements:
+        # Узкая зона поиска по вертикали под логотипами команд
+        if 180 <= e['y'] <= 300:
+            txt = e['text'].upper().strip()
+            for char in txt:
+                if char in potential_form_chars or char in ['В', 'Н', 'П']:
+                    clean_char = char.replace('B', 'В').replace('W', 'В').replace('D', 'Н').replace('L', 'П').replace('X', 'Н')
+                    if clean_char in ['В', 'Н', 'П']:
+                        if e['x'] < screen_center_x:
+                            t1_form_raw.append({'x': e['x'], 'char': clean_char})
+                        else:
+                            t2_form_raw.append({'x': e['x'], 'char': clean_char})
 
-    for row in rows:
-        row.sort(key=lambda item: item['x'])
-        if len(row) >= 2:  # Допускаем мягкий сгусток от 2 символов в строке
-            for e in row:
-                char = e['text'].upper().replace('B', 'В').replace('W', 'В').replace('D', 'Н').replace('L', 'П')
-                if e['x'] < screen_center_x:
-                    if len(t1_form) < 5:
-                        t1_form.append(char)
-                else:
-                    if len(t2_form) < 5:
-                        t2_form.append(char)
+    t1_form_raw.sort(key=lambda item: item['x'])
+    t2_form_raw.sort(key=lambda item: item['x'])
 
-    # Жесткий фильтр: если у любой из команд найдено меньше 5 матчей формы, отбрасываем их полностью
-    if len(t1_form) < 5 or len(t2_form) < 5:
-        form_tokens = []
-    else:
+    t1_form = [item['char'] for item in t1_form_raw][-5:]
+    t2_form = [item['char'] for item in t2_form_raw][-5:]
+
+    if len(t1_form) >= 3 and len(t2_form) >= 3:
         form_tokens = t1_form + t2_form
+    else:
+        form_tokens = []
 
     # Ищем стартовый якорь блока 1X2
     y_1x2 = None
@@ -165,7 +156,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 except ValueError:
                     continue
 
-    # Безопасный сканер фор (поддержка фор со знаками, суффиксов '+', целых чисел и форы 0)
+    # Сканер фор (Поддержка знаков, дробных форий и форы 0)
     scanned_handicaps = []
     for e in elements:
         if e['y'] > y_1x2:
@@ -176,6 +167,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     if match_num:
                         h_str = match_num.group(1)
                         h_val = float(h_str)
+                        
                         row_odds = []
                         for item in elements:
                             if abs(item['y'] - e['y']) <= 12:
@@ -224,7 +216,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 def execute_v31_audit(data: dict) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
-    # Строгий детерминированный расчет xG на базе имплицитных вероятностей 1X2 и тотала 2.5
     try:
         implied_p1 = 1 / k1
         implied_kx = 1 / kx
@@ -342,7 +333,13 @@ def execute_v31_audit(data: dict) -> str:
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    vector_lock = "Верховой" if data["k_tb25"] and data["k_tb25"] < 1.75 else "Стандартный"
+    # ЖЕСТКИЙ ВЕКТОР МАТЧА (Строго по правилу Шага 0: если ТМ(2.5) < 1.75 -> Низовой)
+    if data["k_tu25"] and data["k_tu25"] < 1.75:
+        vector_lock = "Низовой"
+    elif data["k_tb25"] and data["k_tb25"] < 1.75:
+        vector_lock = "Верховой"
+    else:
+        vector_lock = "Стандартный"
 
     for m in markets_to_test:
         odds = m["odds"]
@@ -350,7 +347,10 @@ def execute_v31_audit(data: dict) -> str:
         if odds > 5.50:
             continue
 
-        if vector_lock == "Верховой" and k1 < 1.25 and "Фора 2" in m["name"] and "+" in m["name"]:
+        # ПРАВИЛО ФИЛЬТРАЦИИ ПО ВЕКТОРУ:
+        if vector_lock == "Низовой" and "Тотал больше" in m["name"]:
+            continue
+        if vector_lock == "Верховой" and "Тотал меньше" in m["name"]:
             continue
 
         real_prob = m["real_prob"]
@@ -378,7 +378,7 @@ def execute_v31_audit(data: dict) -> str:
         form_bonus = (wins_count - losses_count) * 2
 
     if not best_pick:
-        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков]"
+        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вектора]"
 
     market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
     confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
