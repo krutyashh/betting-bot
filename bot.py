@@ -53,23 +53,24 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
-    # 2. Ищем координаты ключевых заголовков (якорей блоков) с поддержкой пробелов
+    # 2. Ищем координаты ключевых заголовков (якорей блоков) через слитное написание
     anchors = {}
     for el in elements:
-        t_low = el['text'].lower().replace(" ", "").replace(" ", "")
-        if ('1x2' in t_low or 'исход' in t_low or '1х2' in t_low) and '1x2' not in anchors:
+        t_low = el['text'].lower().replace(" ", "").replace(" ", "").replace(".", "")
+        
+        if ('исход1x2' in t_low or 'исход1х2' in t_low) and '1x2' not in anchors:
             anchors['1x2'] = el['y']
         elif 'тотал' in t_low and 'total' not in anchors and 'комбинирован' not in t_low:
             anchors['total'] = el['y']
         elif 'фора' in t_low and 'handicap' not in anchors:
             anchors['handicap'] = el['y']
-        elif ('комбинирован' in t_low or 'исход и тотал' in t_low) and 'combo' not in anchors:
+        elif ('комбинирован' in t_low or 'исходитотал' in t_low) and 'combo' not in anchors:
             anchors['combo'] = el['y']
 
     print(f"🎯 [OCR DEBUG: Найденные текстовые якоря блоков] -> {anchors}")
 
     if '1x2' not in anchors:
-        print("❌ ОШИБКА ПАРСИНГА: Обязательный якорь '1x2' / 'Исход' не обнаружен на скриншоте.")
+        print("❌ ОШИБКА ПАРСИНГА: Обязательный якорь 'Исход 1X2' не обнаружен на скриншоте.")
         print("================ [OCR DEBUG: КОНЕЦ РАСПОЗНАВАНИЯ (ПРЕРВАНО)] ================\n")
         raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Откройте основную роспись матча.")
         
