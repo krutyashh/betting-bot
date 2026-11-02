@@ -25,42 +25,57 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     results = reader.readtext(img, detail=1)
     
     elements = []
-    form_tokens = []
-    
     if not results:
         pass
     
-    # 1. Собираем все элементы с их точными координатами
     for bbox, text, prob in results:
         y_min = int(bbox[0][1])
         x_min = int(bbox[0][0])
+        x_max = int(bbox[2][0])
         clean_txt = text.strip()
-        elements.append({'y': y_min, 'x': x_min, 'text': clean_txt})
-        
-        # Сбор формы команд (буквы В, Н, П, W, D, L в кружках под названиями)
-        if clean_txt.upper() in ['В', 'Н', 'П', 'W', 'D', 'L', 'B'] and len(clean_txt) == 1:
-            if 200 <= y_min <= 320:
-                form_tokens.append(clean_txt.upper().replace('B', 'В'))
+        elements.append({'y': y_min, 'x': x_min, 'x_max': x_max, 'text': clean_txt})
 
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
-    # СТРОГОЕ И ТОЧНОЕ ОПРЕДЕЛЕНИЕ НАЗВАНИЯ МАТЧА
+    # ПРАВИЛО 2: В шапке матча идем снизу вверх по строкам, ищем строку с командами по разделителю "пробел дефис пробел"
     match_title = "Команда 1 — Команда 2"
-    for e in elements:
-        if re.search(r'[-—–]', e['text']) and len(e['text']) > 5 and 170 <= e['y'] <= 260:
-            match_title = e['text']
-            break
-            
-    if match_title == "Команда 1 — Команда 2":
-        team_candidates = []
-        for e in elements:
-            if 170 <= e['y'] <= 260:
-                txt = e['text']
-                if not re.search(r'(тур|часть|сегодня|вчера|футбол|лига|\d{2}:\d{2})', txt.lower()) and len(txt) > 2:
-                    team_candidates.append(txt)
-        if len(team_candidates) >= 2:
-            match_title = f"{team_candidates[0]} — {team_candidates[1]}"
+    header_elements = [e for e in elements if 50 <= e['y'] <= 350]
+    header_elements_bottom_up = sorted(header_elements, key=lambda e: e['y'], reverse=True)
+    
+    screen_center_x = img.shape[1] / 2
+
+    for e in header_elements_bottom_up:
+        txt = e['text']
+        # Ищем строку с пробел + дефис + пробел
+        if re.search(r'\s+[-—–]\s+', txt):
+            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера)', txt.lower()):
+                parts = re.split(r'\s+[-—–]\s+', txt)
+                if len(parts) >= 2:
+                    match_title = f"{parts[0].strip()} — {parts[1].strip()}"
+                    break
+
+    # ПРАВИЛО 3: Ищем буквы формы (п, в, н / w, d, l), разделенные пробелами в зеленой зоне шапки (снизу вверх)
+    potential_form_chars = ['В', 'Н', 'П', 'W', 'D', 'L', 'B']
+    t1_form = []
+    t2_form = []
+
+    for e in header_elements_bottom_up:
+        txt_clean = e['text'].upper().strip()
+        if txt_clean in potential_form_chars and len(txt_clean) == 1:
+            char = txt_clean.replace('B', 'В')
+            x_pos = e['x']
+            if x_pos < screen_center_x:
+                if len(t1_form) < 5:
+                    t1_form.append(char)
+            else:
+                if len(t2_form) < 5:
+                    t2_form.append(char)
+
+    # Так как шли снизу вверх, разворачиваем обратно для правильного хронологического порядка
+    t1_form.reverse()
+    t2_form.reverse()
+    form_tokens = t1_form + t2_form
 
     # Ищем стартовый якорь блока 1X2
     y_1x2 = None
@@ -71,7 +86,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             break
 
     if y_1x2 is None:
-        y_1x2 = 300
+        y_1x2 = 350
 
     def extract_odds_in_zone(y_start, y_end):
         zone_items = []
@@ -99,7 +114,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    # УНИВЕРСАЛЬНЫЙ СКАНЕР ТОТАЛОВ ПО ПАТТЕРНУ (Ищет линии вида X.5 ниже 1X2)
+    # Универсальный сканер тоталов по паттерну
     scanned_totals = []
     for e in elements:
         if e['y'] > y_1x2:
@@ -134,15 +149,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 except ValueError:
                     continue
 
-    # УНИВЕРСАЛЬНЫЙ СКАНЕР ФОР ПО ПАТТЕРНУ (Строго со знаком + или - и суффиксом плюс/минус)
+    # Универсальный сканер фор по паттерну
     scanned_handicaps = []
     for e in elements:
         if e['y'] > y_1x2:
             clean_t = e['text'].replace(',', '.').replace(' ', '').replace('+', '').replace('-', '')
-            # Форы на скриншотах Winline имеют вид -2.5+ или аналогичные маркеры
             if re.match(r'^[0-9](\.[05])?$', clean_t) and ('+' in e['text'] or '-' in e['text']):
                 try:
-                    # Восстанавливаем знак из оригинального текста
                     raw_txt = e['text']
                     sign = -1 if '-' in raw_txt else 1
                     h_val = float(re.findall(r'\d+\.?\d*', raw_txt)[0]) * sign
@@ -174,7 +187,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 except (ValueError, IndexError):
                     continue
 
-    # Базовый тотал для калибровки xG
     k_tu25, k_tb25 = None, None
     for t in scanned_totals:
         if t["line"] == 2.5:
@@ -206,7 +218,6 @@ def execute_v31_audit(data: dict) -> str:
     xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
     xG_2 = max(0.3, xG_total - xG_1)
 
-    # Генерация матрицы Пуассона 8x8 для точного покрытия верховых матчей
     grid = np.zeros((8, 8))
     score_probs = []
     for i in range(8):
@@ -226,7 +237,6 @@ def execute_v31_audit(data: dict) -> str:
     if 69.0 <= top4_prob <= 72.0 and (top4_prob + 3.0) > 72.0:
         cascade_passed = False
 
-    # Безопасное разделение названий команд через любое тире
     teams = re.split(r'\s*[-—–]\s*', data['match'])
     t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
     t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
@@ -234,14 +244,12 @@ def execute_v31_audit(data: dict) -> str:
     if not cascade_passed:
         return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Причина: Нарушен каскадный лимит матрицы Пуассона]"
 
-    # ПОЛНЫЙ ПУЛ РЫНКОВ С МАТЕМАТИЧЕСКИ ВЫВЕРЕННЫМИ ВЕРОЯТНОСТЯМИ
     markets_to_test = [
         {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i > j)},
         {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i == j)},
         {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i < j)},
     ]
 
-    # Добавление всех отсканированных линий тоталов
     for t_item in data.get("scanned_totals", []):
         line = t_item["line"]
         k_tu = t_item["tu"]
@@ -257,7 +265,6 @@ def execute_v31_audit(data: dict) -> str:
             "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (i + j) > line)
         })
 
-    # Добавление фор с точным расчетом по разнице голов (i - j > -H)
     for h_item in data.get("scanned_handicaps", []):
         h_val = h_item["line"]
         markets_to_test.append({
@@ -278,7 +285,7 @@ def execute_v31_audit(data: dict) -> str:
     for m in markets_to_test:
         odds = m["odds"]
         real_prob = m["real_prob"]
-        real_prob_min = real_prob - 3.0  # Дисперсионный буфер -3%
+        real_prob_min = real_prob - 3.0
         implied_prob = (1 / odds) * 100
         
         if odds >= 2.10:
