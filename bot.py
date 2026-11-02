@@ -55,27 +55,43 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
-    # ПРАВИЛО 3: Ищем буквы формы (п, в, н / w, d, l), разделенные пробелами в зеленой зоне шапки (снизу вверх)
+    # СТРОГИЙ ПОИСК ФОРМЫ ПО СТРОКАМ (Построковая группировка по Y)
     potential_form_chars = ['В', 'Н', 'П', 'W', 'D', 'L', 'B']
+    form_header_elements = [e for e in elements if 50 <= e['y'] <= 300]
+    
+    rows = []
+    for e in form_header_elements:
+        txt_clean = e['text'].upper().strip()
+        if txt_clean in potential_form_chars and len(txt_clean) == 1:
+            placed = False
+            for row in rows:
+                if abs(row[0]['y'] - e['y']) <= 8:
+                    row.append(e)
+                    placed = True
+                    break
+            if not placed:
+                rows.append([e])
+
     t1_form = []
     t2_form = []
 
-    for e in header_elements_bottom_up:
-        txt_clean = e['text'].upper().strip()
-        if txt_clean in potential_form_chars and len(txt_clean) == 1:
-            char = txt_clean.replace('B', 'В')
-            x_pos = e['x']
-            if x_pos < screen_center_x:
-                if len(t1_form) < 5:
-                    t1_form.append(char)
-            else:
-                if len(t2_form) < 5:
-                    t2_form.append(char)
+    for row in rows:
+        row.sort(key=lambda item: item['x'])
+        if len(row) >= 3:  # Строка должна содержать сгусток элементов формы
+            for e in row:
+                char = e['text'].upper().replace('B', 'В').replace('W', 'В').replace('D', 'Н').replace('L', 'П')
+                if e['x'] < screen_center_x:
+                    if len(t1_form) < 5:
+                        t1_form.append(char)
+                else:
+                    if len(t2_form) < 5:
+                        t2_form.append(char)
 
-    # Так как шли снизу вверх, разворачиваем обратно для правильного хронологического порядка
-    t1_form.reverse()
-    t2_form.reverse()
-    form_tokens = t1_form + t2_form
+    # Жесткий фильтр: если у любой из команд найдено меньше 5 матчей формы, отбрасываем их полностью
+    if len(t1_form) < 5 or len(t2_form) < 5:
+        form_tokens = []
+    else:
+        form_tokens = t1_form + t2_form
 
     # Ищем стартовый якорь блока 1X2
     y_1x2 = None
@@ -149,16 +165,17 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 except ValueError:
                     continue
 
-    # Универсальный сканер фор по паттерну (исправлен захват точных дробных значений с .5)
+    # Универсальный сканер фор (поддержка форы 0, целых и дробных значений со знаком)
     scanned_handicaps = []
     for e in elements:
         if e['y'] > y_1x2:
             raw_txt = e['text'].replace(',', '.').replace(' ', '')
-            if re.search(r'[-+]\d+(\.\d+)?', raw_txt):
+            if re.search(r'([-+]?\d+(\.\d+)?)', raw_txt):
                 try:
-                    match_num = re.search(r'([-+]\d+(\.\d+)?)', raw_txt)
+                    match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
                     if match_num:
-                        h_val = float(match_num.group(1))
+                        h_str = match_num.group(1)
+                        h_val = float(h_str)
                         row_odds = []
                         for item in elements:
                             if abs(item['y'] - e['y']) <= 12:
@@ -207,17 +224,29 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 def execute_v31_audit(data: dict) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
-    if data["k_tu25"] and data["k_tb25"]:
-        p_under = 1 / data["k_tu25"]
-        xG_total = max(1.2, min(4.5, 3.2 - (p_under - 0.5) * 2.5))
-    else:
-        xG_total = 2.55
+    # Строгий детерминированный расчет xG на базе имплицитных вероятностей 1X2 и тотала 2.5
+    try:
+        implied_p1 = 1 / k1
+        implied_kx = 1 / kx
+        implied_p2 = 1 / k2
+        sum_1x2 = implied_p1 + implied_kx + implied_p2
         
-    power_diff = (k2 - k1) / (k1 + k2 + kx)
-    xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
-    xG_2 = max(0.3, xG_total - xG_1)
+        p1_norm = implied_p1 / sum_1x2
+        p2_norm = implied_p2 / sum_1x2
+        
+        if data["k_tu25"] and data["k_tb25"]:
+            impl_tb = 1 / data["k_tb25"]
+            impl_tm = 1 / data["k_tu25"]
+            xG_total = max(1.0, min(5.0, 2.5 * (impl_tb / (impl_tb + impl_tm) + 0.5)))
+        else:
+            xG_total = 2.50
+            
+        xG_1 = max(0.2, xG_total * (p1_norm / (p1_norm + p2_norm + 0.001)))
+        xG_2 = max(0.2, xG_total - xG_1)
+    except ZeroDivisionError:
+        xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
 
-    # РАСШИРЕНИЕ МАТРИЦЫ ПУАССОНА ДО 10x10 (устранение просадки хвоста при высоком xG)
+    # РАСШИРЕНИЕ МАТРИЦЫ ПУАССОНА ДО 10x10
     grid = np.zeros((10, 10))
     score_probs = []
     for i in range(10):
@@ -267,16 +296,30 @@ def execute_v31_audit(data: dict) -> str:
 
     for h_item in data.get("scanned_handicaps", []):
         h_val = h_item["line"]
-        markets_to_test.append({
-            "name": f"Фора 1 ({h_val:+.1f})", 
-            "odds": h_item["h1"], 
-            "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h_val)
-        })
-        markets_to_test.append({
-            "name": f"Фора 2 ({-h_val:+.1f})", 
-            "odds": h_item["h2"], 
-            "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > h_val)
-        })
+        if h_val == 0.0:
+            prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if i > j)
+            prob_draw = sum(grid[i, j] for i in range(10) for j in range(10) if i == j)
+            markets_to_test.append({
+                "name": "Фора 1 (0)", 
+                "odds": h_item["h1"], 
+                "real_prob": prob_h1 + (prob_draw * 0.5)
+            })
+            markets_to_test.append({
+                "name": "Фора 2 (0)", 
+                "odds": h_item["h2"], 
+                "real_prob": (100.0 - prob_h1 - prob_draw) + (prob_draw * 0.5)
+            })
+        else:
+            markets_to_test.append({
+                "name": f"Фора 1 ({h_val:+.1f})", 
+                "odds": h_item["h1"], 
+                "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h_val)
+            })
+            markets_to_test.append({
+                "name": f"Фора 2 ({-h_val:+.1f})", 
+                "odds": h_item["h2"], 
+                "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > h_val)
+            })
 
     best_pick = None
     max_margin_val = -999.0
@@ -287,12 +330,9 @@ def execute_v31_audit(data: dict) -> str:
     for m in markets_to_test:
         odds = m["odds"]
         
-        # ЗАЩИТНЫЙ ФИЛЬТР 1: Отсекаем дикие коэффициенты-ловушки выше 5.50
         if odds > 5.50:
             continue
 
-        # ЗАЩИТНЫЙ ФИЛЬТР 2 (Vector Lock Enforcement): Предотвращаем конфликт логики.
-        # Если матч явно верховой и фаворит идет ниже 1.25, запрещаем ставить на плюсовые форы аутсайдера.
         if vector_lock == "Верховой" and k1 < 1.25 and "Фора 2" in m["name"] and "+" in m["name"]:
             continue
 
@@ -321,7 +361,7 @@ def execute_v31_audit(data: dict) -> str:
         form_bonus = (wins_count - losses_count) * 2
 
     if not best_pick:
-        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вектора]"
+        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков]"
 
     market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
     confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
@@ -361,7 +401,7 @@ def execute_v31_audit(data: dict) -> str:
     if chosen_odds >= 2.10:
         final_line = f"\n{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
     else:
-        final_line = f"\n{t1} — {t2} | Основная ставка по строгому регламенту отсутствует, зафиксирован подтвержденный математический валуй (План Б): {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {final_status})"
+        final_line = f"\n{t1} — {t2} | Основная ставка по строгому регламенту отсутствует, зафиксирован подтвержденный математический валуй (План Б): {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status} (План Б)]"
 
     return report + final_line
 
