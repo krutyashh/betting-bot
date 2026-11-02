@@ -123,7 +123,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
     # Универсальный сканер тоталов по паттерну
     scanned_totals = []
-    y_max_totals = y_1x2  # Будем фиксировать нижнюю границу тоталов
     for e in elements:
         if e['y'] > y_1x2:
             clean_t = e['text'].replace(',', '.').replace(' ', '')
@@ -154,20 +153,17 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                                 "tu": left_vals[-1],
                                 "tb": right_vals[0]
                             })
-                            if e['y'] > y_max_totals:
-                                y_max_totals = e['y']
                 except ValueError:
                     continue
 
-    # ЖЕСТКОЕ ПРАВИЛО: Блок фор должен начинаться ниже исходов 1X2 и ниже тоталов (если они есть)
-    y_handicap_start = max(y_1x2 + 100, y_max_totals + 30)
+    # СТАРТ ПОИСКА ФОР: сразу ниже блока 1X2, независимо от тоталов
+    y_handicap_start = y_1x2 + 40
 
-    # Сканер фор (Строго ниже тоталов/1X2, требует знака + / - или строгого нуля)
+    # Сканер фор (Требует знака + / - или строгого нуля)
     scanned_handicaps = []
     for e in elements:
         if e['y'] > y_handicap_start:
             raw_txt = e['text'].replace(',', '.').replace(' ', '').rstrip('+')
-            # Ищем только числа со знаками префикса (+/-) или изолированный ноль
             if re.match(r'^([-+]\d+(\.\d+)?|0(\.0)?)$', raw_txt):
                 try:
                     match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
@@ -268,9 +264,6 @@ def execute_v31_audit(data: dict) -> str:
     t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
     t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
 
-    if not cascade_passed:
-        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Причина: Нарушен каскадный лимит матрицы Пуассона]"
-
     markets_to_test = [
         {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i > j)},
         {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i == j)},
@@ -340,7 +333,7 @@ def execute_v31_audit(data: dict) -> str:
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    # ЖЕСТКИЙ ВЕКТОР МАТЧА (Строго по правилу Шага 0: если ТМ(2.5) < 1.75 -> Низовой)
+    # ЖЕСТКИЙ ВЕКТОР МАТЧА
     if data["k_tu25"] and data["k_tu25"] < 1.75:
         vector_lock = "Низовой"
     elif data["k_tb25"] and data["k_tb25"] < 1.75:
@@ -348,35 +341,41 @@ def execute_v31_audit(data: dict) -> str:
     else:
         vector_lock = "Стандартный"
 
-    for m in markets_to_test:
-        odds = m["odds"]
-        
-        if odds > 5.50:
-            continue
+    # Если каскад не прошел, фиксируем статус СКИП, но продолжаем расчет для вывода отчета
+    if not cascade_passed:
+        final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нарушен каскадный лимит матрицы Пуассона]"
+    else:
+        for m in markets_to_test:
+            odds = m["odds"]
+            
+            if odds > 5.50:
+                continue
 
-        # ПРАВИЛО ФИЛЬТРАЦИИ ПО ВЕКТОРУ:
-        if vector_lock == "Низовой" and "Тотал больше" in m["name"]:
-            continue
-        if vector_lock == "Верховой" and "Тотал меньше" in m["name"]:
-            continue
+            if vector_lock == "Низовой" and "Тотал больше" in m["name"]:
+                continue
+            if vector_lock == "Верховой" and "Тотал меньше" in m["name"]:
+                continue
 
-        real_prob = m["real_prob"]
-        real_prob_min = real_prob - 3.0
-        implied_prob = (1 / odds) * 100
-        
-        if odds >= 2.10:
-            vm_min = real_prob_min - implied_prob
-            if vm_min >= 1.50 and vm_min > max_margin_val:
-                max_margin_val = vm_min
-                best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
-                final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
-        else:
-            if real_prob_min > (implied_prob + 6.0):
-                excess = real_prob_min - (implied_prob + 6.0)
-                if excess > max_margin_val:
-                    max_margin_val = excess
-                    best_pick = (m["name"], odds, real_prob_min, real_prob, real_prob_min, implied_prob)
-                    final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ"
+            real_prob = m["real_prob"]
+            real_prob_min = real_prob - 3.0
+            implied_prob = (1 / odds) * 100
+            
+            if odds >= 2.10:
+                vm_min = real_prob_min - implied_prob
+                if vm_min >= 1.50 and vm_min > max_margin_val:
+                    max_margin_val = vm_min
+                    best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
+                    final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
+            else:
+                if real_prob_min > (implied_prob + 6.0):
+                    excess = real_prob_min - (implied_prob + 6.0)
+                    if excess > max_margin_val:
+                        max_margin_val = excess
+                        best_pick = (m["name"], odds, real_prob_min, real_prob, real_prob_min, implied_prob)
+                        final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ"
+
+        if not best_pick:
+            final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вектора]"
 
     form_bonus = 0
     if data["form_tokens"]:
@@ -384,16 +383,18 @@ def execute_v31_audit(data: dict) -> str:
         losses_count = data["form_tokens"].count('П')
         form_bonus = (wins_count - losses_count) * 2
 
-    if not best_pick:
-        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вектора]"
-
-    market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
-    confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
-    stake_pct = 5 if confidence >= 80 else 3
-
     totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data["scanned_totals"]]) if data["scanned_totals"] else "Не найдены"
     hc_str = ", ".join([f"{h['line']:+.1f} (к1:{h['h1']}/к2:{h['h2']})" for h in data["scanned_handicaps"]]) if data["scanned_handicaps"] else "Не найдены"
     form_str = ", ".join(data["form_tokens"]) if data["form_tokens"] else "Не считывались"
+
+    if best_pick:
+        market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
+        confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
+        stake_pct = 5 if confidence >= 80 else 3
+    else:
+        market_name, chosen_odds, r_prob, r_prob_min, imp_prob = "Отсутствует", 0.0, 0.0, 0.0, 0.0
+        confidence = 0
+        stake_pct = 0
 
     report = f"""<b>Шаг 0: Калибровка и привязка котировок</b>
 - <b>Матч</b>: {t1} — {t2}
@@ -408,7 +409,7 @@ def execute_v31_audit(data: dict) -> str:
 - ТОП-2 счетов: {top2_prob:.1f}% (Лимит &le; 46%)
 - ТОП-3 счетов: {top3_prob:.1f}% (Лимит &le; 62%)
 - ТОП-4 счетов: {top4_prob:.1f}% (Лимит &le; 72%)
-- Статус каскада: Пройдено успешно
+- Статус каскада: {"Пройдено успешно" if cascade_passed else "Нарушен лимит"}
 
 <b>Шаг 2 &amp; 3: Массив рынков и стресс-тест буфера</b>
 - Проверен рынок: <b>{market_name}</b> (Коэф: {chosen_odds})
@@ -422,10 +423,13 @@ def execute_v31_audit(data: dict) -> str:
 
 <b>Шаг 6: ИТОГОВЫЙ ПРИКАЗ ПО СТАВКЕ</b>"""
 
-    if chosen_odds >= 2.10:
-        final_line = f"\n{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
+    if best_pick:
+        if chosen_odds >= 2.10:
+            final_line = f"\n{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
+        else:
+            final_line = f"\n{t1} — {t2} | Основная ставка по строгому регламенту отсутствует, зафиксирован подтвержденный математический валуй (План Б): {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status} (План Б)]"
     else:
-        final_line = f"\n{t1} — {t2} | Основная ставка по строгому регламенту отсутствует, зафиксирован подтвержденный математический валуй (План Б): {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status} (План Б)]"
+        final_line = f"\n{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP)"
 
     return report + final_line
 
