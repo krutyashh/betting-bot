@@ -25,12 +25,10 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     results = reader.readtext(img, detail=1)
     
     elements = []
-    match_title = "Не распознано"
     form_tokens = []
     
-    print("\n================ [OCR DEBUG: НАЧАЛО РАСПОЗНАВАНИЯ СКРИНШОТА] ================")
     if not results:
-        print("⚠️ ВНИМАНИЕ: EasyOCR вернул абсолютно пустой результат (ничего не смог прочитать)!")
+        pass
     
     # 1. Собираем все элементы с их точными координатами
     for bbox, text, prob in results:
@@ -38,21 +36,27 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         x_min = int(bbox[0][0])
         clean_txt = text.strip()
         elements.append({'y': y_min, 'x': x_min, 'text': clean_txt})
-        print(f"📍 Y:{y_min:4d} | X:{x_min:4d} | Текст: '{clean_txt}' (уверенность: {prob:.2f})")
         
-        # Название матча (ищем в верхней части с дефисом)
-        if "-" in clean_txt and len(clean_txt) > 6 and y_min < 350:
-            match_title = clean_txt
-            
         # Форма команд
         if clean_txt.upper() in ['В', 'Н', 'П', 'W', 'D', 'L'] and len(clean_txt) == 1:
             form_tokens.append(clean_txt.upper())
 
-    print("----------------------------------------------------------------------------")
-
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
+    # Автоматическое определение названия матча по верхней зоне
+    team_candidates = []
+    match_title = "Команда 1 — Команда 2"
+    for e in elements:
+        if 130 <= e['y'] <= 220:
+            txt = e['text']
+            if not re.search(r'(тур|часть|сегодня|вчера|\d{2}:\d{2})', txt.lower()) and len(txt) > 2:
+                team_candidates.append(txt)
+    if len(team_candidates) >= 2:
+        match_title = f"{team_candidates[0]} — {team_candidates[1]}"
+    elif len(team_candidates) == 1:
+        match_title = team_candidates[0]
+
     # 2. Ищем координаты ключевых заголовков (якорей блоков) через слитное написание
     anchors = {}
     for el in elements:
@@ -67,11 +71,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         elif ('комбинирован' in t_low or 'исходитотал' in t_low) and 'combo' not in anchors:
             anchors['combo'] = el['y']
 
-    print(f"🎯 [OCR DEBUG: Найденные текстовые якоря блоков] -> {anchors}")
-
     if '1x2' not in anchors:
-        print("❌ ОШИБКА ПАРСИНГА: Обязательный якорь 'Исход 1X2' не обнаружен на скриншоте.")
-        print("================ [OCR DEBUG: КОНЕЦ РАСПОЗНАВАНИЯ (ПРЕРВАНО)] ================\n")
         raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Откройте основную роспись матча.")
         
     y_1x2 = anchors['1x2']
@@ -81,9 +81,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         zone_items = []
         for e in elements:
             if y_start <= e['y'] < y_end:
-                # Всевозможные варианты разделителей дроби от OCR заменяем на точку, убираем пробелы
                 clean_t = e['text'].replace(',', '.').replace('․', '.').replace('·', '.').replace(' ', '')
-                # Гибкий поиск чисел с плавающей точкой (без строгих границ \b)
                 found_nums = re.findall(r'\d{1,3}\.\d{1,2}', clean_t)
                 for num_str in found_nums:
                     try:
@@ -92,42 +90,28 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                             zone_items.append((e['x'], val))
                     except ValueError:
                         continue
-        # Сортируем слева направо по оси X
         zone_items.sort(key=lambda item: item[0])
-        extracted = [item[1] for item in zone_items]
-        print(f"📊 [ZONA {zone_name}] Y от {y_start} до {y_end} -> Найденные котировки: {extracted}")
-        return extracted
+        return [item[1] for item in zone_items]
 
-    # Нижняя граница с запасом для сбора всего экрана
     max_y = max([e['y'] for e in elements]) + 100 if elements else 1000
 
-    # 3. Извлекаем блоки по зонам (для 1X2 берем строго диапазон под заголовком: от y_1x2 до y_1x2 + 100)
-    print("--- [Детальный разбор зон росписи] ---")
+    # 3. Извлекаем блоки по зонам
     odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 100, "1X2")
     if len(odds_1x2) < 3:
-        print(f"❌ ОШИБКА ПАРСИНГА 1X2: Найдено котировок: {len(odds_1x2)}. Требуется ровно 3.")
-        print("================ [OCR DEBUG: КОНЕЦ РАСПОЗНАВАНИЯ (ПРЕРВАНО)] ================\n")
         raise ValueError(f"Ошибка парсинга 1X2: найдено коэффициентов: {len(odds_1x2)}. Требуется ровно 3.")
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    # Границы для остальных блоков через безопасный поиск ниже 1X2
     y_total = anchors.get('total', y_1x2 + 120)
     y_hc = anchors.get('handicap', y_total + 200)
     y_combo = anchors.get('combo', y_hc + 200)
 
-    # Тоталы
     odds_totals = extract_odds_in_zone(y_total, y_hc, "TOTALS")
     k_tu25 = odds_totals[2] if len(odds_totals) > 2 else (odds_totals[0] if len(odds_totals) > 0 else None)
     k_tb25 = odds_totals[5] if len(odds_totals) > 5 else (odds_totals[1] if len(odds_totals) > 1 else None)
 
-    # Форы и Комбо
     odds_handicaps = extract_odds_in_zone(y_hc, y_combo, "HANDICAPS")
     odds_combos = extract_odds_in_zone(y_combo, max_y, "COMBOS")
-
-    print("----------------------------------------------------------------------------")
-    print(f"✅ [ИТОГ ПАРСИНГА] Матч: '{match_title}' | 1X2: [{k_p1}, {k_x}, {k_p2}] | ТМ2.5: {k_tu25} | ТБ2.5: {k_tb25}")
-    print("================ [OCR DEBUG: УСПЕШНО ЗАВЕРШЕНО] ===============-\n")
 
     return {
         "match": match_title,
@@ -142,18 +126,16 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 def execute_v31_audit(data: dict) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
-    # Калиброванный расчет xG через имплицитную вероятность тотала 2.5
     if data["k_tu25"] and data["k_tb25"]:
         p_under = 1 / data["k_tu25"]
         xG_total = max(1.2, min(4.5, 3.2 - (p_under - 0.5) * 2.5))
     else:
-        xG_total = 2.55  # Стандартный fallback при отсутствии тоталов в кадре
+        xG_total = 2.55
         
     power_diff = (k2 - k1) / (k1 + k2 + kx)
     xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
     xG_2 = max(0.3, xG_total - xG_1)
 
-    # Генерация матрицы Пуассона 6x6
     grid = np.zeros((6, 6))
     score_probs = []
     for i in range(6):
@@ -169,7 +151,6 @@ def execute_v31_audit(data: dict) -> str:
     top4_prob = top3_prob + score_probs[3][1]
     tail_prob = 100.0 - top4_prob
 
-    # Каскадный стоп-кран
     cascade_passed = (top2_prob <= 46.0) and (top3_prob <= 62.0) and (top4_prob <= 72.0) and (tail_prob >= 28.0)
     if 69.0 <= top4_prob <= 72.0 and (top4_prob + 3.0) > 72.0:
         cascade_passed = False
@@ -180,7 +161,6 @@ def execute_v31_audit(data: dict) -> str:
     if not cascade_passed:
         return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Причина: Нарушен каскадный лимит матрицы Пуассона]"
 
-    # Пул рынков формируется СТРОГО из реальных подтвержденных данных со скриншота
     markets_to_test = [
         {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i > j)},
         {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i == j)},
@@ -202,25 +182,24 @@ def execute_v31_audit(data: dict) -> str:
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    # Аудит по Плану А / Плану Б с дисперсионным буфером -3%
     for m in markets_to_test:
         odds = m["odds"]
         real_prob = m["real_prob"]
-        real_prob_min = real_prob - 3.0  # Буфер безопасности -3%
+        real_prob_min = real_prob - 3.0
         implied_prob = (1 / odds) * 100
         
         if odds >= 2.10:
             vm_min = real_prob_min - implied_prob
             if vm_min >= 1.50 and vm_min > max_margin_val:
                 max_margin_val = vm_min
-                best_pick = (m["name"], odds, vm_min)
+                best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
                 final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
         else:
             if real_prob_min > (implied_prob + 6.0):
                 excess = real_prob_min - (implied_prob + 6.0)
                 if excess > max_margin_val:
                     max_margin_val = excess
-                    best_pick = (m["name"], odds, real_prob_min)
+                    best_pick = (m["name"], odds, real_prob_min, real_prob, real_prob_min, implied_prob)
                     final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ"
 
     form_bonus = 0
@@ -232,14 +211,43 @@ def execute_v31_audit(data: dict) -> str:
     if not best_pick:
         return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по видимым рынкам]"
 
-    market_name, chosen_odds, val_score = best_pick
-    confidence = min(95, max(60, int(75 + val_score * 2 + form_bonus)))
+    market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
+    confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
     stake_pct = 5 if confidence >= 80 else 3
 
+    vector_lock = "Верховой" if data["k_tb25"] and data["k_tb25"] < 1.75 else "Стандартный"
+
+    # Формирование детального отчета по Шагам 0–6
+    report = f"""<b>Шаг 0: Калибровка и привязка котировок</b>
+* П1 = {k1}, Х = {kx}, П2 = {k2}
+* ТМ(2.5) = {data.get("k_tu25")}, ТБ(2.5) = {data.get("k_tb25")}
+* xG: Команда 1 ({xG_1:.2f}) / Команда 2 ({xG_2:.2f}) | Сумма: {xG_total:.2f}
+* Вектор матча: {vector_lock}
+
+<b>Шаг 1: Матрица Пуассона и каскадный контроль</b>
+* ТОП-2 счетов: {top2_prob:.1f}% (Лимит <= 46%)
+* ТОП-3 счетов: {top3_prob:.1f}% (Лимит <= 62%)
+* ТОП-4 счетов: {top4_prob:.1f}% (Лимит <= 72%)
+* Статус каскада: Пройдено успешно
+
+<b>Шаг 2 & 3: Массив рынков и стресс-тест буфера</b>
+* Проверен рынок: <b>{market_name}</b> (Коэф: {chosen_odds})
+* Real Prob: {r_prob:.1f}% | Real Prob(min с учетом -3%): {r_prob_min:.1f}%
+* Implied Prob БК: {imp_prob:.1f}%
+
+<b>Шаг 4 & 5: Уверенность и финансовый менеджмент</b>
+* Индекс уверенности: {confidence}%
+* Рекомендуемый банк: {stake_pct}% от общего банка
+* Статус: [СТАТУС: {final_status}]
+
+<b>Шаг 6: ИТОГОВЫЙ ПРИКАЗ ПО СТАВКЕ</b>"""
+
     if chosen_odds >= 2.10:
-        return f"{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
+        final_line = f"\n{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
     else:
-        return f"{t1} — {t2} | Основная ставка по строгому регламенту отсутствует, зафиксирован подтвержденный математический валуй (План Б): {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {final_status})"
+        final_line = f"\n{t1} — {t2} | Основная ставка по строгому регламенту отсутствует, зафиксирован подтвержденный математический валуй (План Б): {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {final_status})"
+
+    return report + final_line
 
 
 @bot.message_handler(commands=['start'])
@@ -257,7 +265,7 @@ def func_handle_photo(message):
         parsed_data = parse_screenshot(downloaded_file)
         result_verdict = execute_v31_audit(parsed_data)
         
-        bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id)
+        bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
     except Exception as e:
         tb_str = traceback.format_exc()
         error_message = f"❌ Ошибка аудита:\n<pre>{tb_str}</pre>"
