@@ -44,23 +44,27 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
-    # Автоматическое определение названия матча по верхней зоне
-    team_candidates = []
+    # Определение названия матча
     match_title = "Команда 1 — Команда 2"
     for e in elements:
-        if 130 <= e['y'] <= 220:
-            txt = e['text']
-            if not re.search(r'(тур|часть|сегодня|вчера|\d{2}:\d{2})', txt.lower()) and len(txt) > 2:
-                team_candidates.append(txt)
-    if len(team_candidates) >= 2:
-        match_title = f"{team_candidates[0]} — {team_candidates[1]}"
-    elif len(team_candidates) == 1:
-        match_title = team_candidates[0]
+        if re.search(r'[-—–]', e['text']) and len(e['text']) > 5 and e['y'] < 350:
+            match_title = e['text']
+            break
+            
+    if match_title == "Команда 1 — Команда 2":
+        team_candidates = []
+        for e in elements:
+            if e['y'] < 300:
+                txt = e['text']
+                if not re.search(r'(тур|часть|сегодня|вчера|\d{2}:\d{2})', txt.lower()) and len(txt) > 2:
+                    team_candidates.append(txt)
+        if len(team_candidates) >= 2:
+            match_title = f"{team_candidates[0]} — {team_candidates[1]}"
 
-    # 2. Ищем координаты ключевых заголовков (якорей блоков) через слитное написание
+    # 2. Ищем координаты ключевых заголовков (якорей блоков)
     anchors = {}
     for el in elements:
-        t_low = el['text'].lower().replace(" ", "").replace(" ", "").replace(".", "")
+        t_low = el['text'].lower().replace(" ", "").replace(".", "")
         
         if ('исход1x2' in t_low or 'исход1х2' in t_low) and '1x2' not in anchors:
             anchors['1x2'] = el['y']
@@ -76,8 +80,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         
     y_1x2 = anchors['1x2']
     
-    # Универсальная функция извлечения чисел (коэффициентов) в заданном вертикальном диапазоне
-    def extract_odds_in_zone(y_start, y_end, zone_name=""):
+    # Универсальная функция извлечения коэффициентов
+    def extract_odds_in_zone(y_start, y_end):
         zone_items = []
         for e in elements:
             if y_start <= e['y'] < y_end:
@@ -96,7 +100,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     max_y = max([e['y'] for e in elements]) + 100 if elements else 1000
 
     # 3. Извлекаем блоки по зонам
-    odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 100, "1X2")
+    odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 100)
     if len(odds_1x2) < 3:
         raise ValueError(f"Ошибка парсинга 1X2: найдено коэффициентов: {len(odds_1x2)}. Требуется ровно 3.")
     
@@ -106,19 +110,87 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     y_hc = anchors.get('handicap', y_total + 200)
     y_combo = anchors.get('combo', y_hc + 200)
 
-    odds_totals = extract_odds_in_zone(y_total, y_hc, "TOTALS")
-    k_tu25 = odds_totals[2] if len(odds_totals) > 2 else (odds_totals[0] if len(odds_totals) > 0 else None)
-    k_tb25 = odds_totals[5] if len(odds_totals) > 5 else (odds_totals[1] if len(odds_totals) > 1 else None)
+    all_x = [e['x'] for e in elements]
+    screen_center_x = (min(all_x) + max(all_x)) / 2 if all_x else 200
 
-    odds_handicaps = extract_odds_in_zone(y_hc, y_combo, "HANDICAPS")
-    odds_combos = extract_odds_in_zone(y_combo, max_y, "COMBOS")
+    # Сканер тоталов
+    scanned_totals = []
+    for e in elements:
+        if y_total <= e['y'] < y_hc:
+            clean_t = e['text'].replace(',', '.').replace(' ', '')
+            if re.match(r'^[0-5]\.[05]$', clean_t) and abs(e['x'] - screen_center_x) < 100:
+                line_val = float(clean_t)
+                row_odds = []
+                for item in elements:
+                    if abs(item['y'] - e['y']) <= 15:
+                        c_text = item['text'].replace(',', '.').replace(' ', '')
+                        found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                        for f_num in found:
+                            try:
+                                val = float(f_num)
+                                if val == line_val and abs(item['x'] - e['x']) < 15:
+                                    continue
+                                if 1.01 <= val <= 50.0:
+                                    row_odds.append((item['x'], val))
+                            except ValueError:
+                                continue
+                row_odds.sort(key=lambda x: x[0])
+                left_vals = [v[1] for v in row_odds if v[0] < e['x']]
+                right_vals = [v[1] for v in row_odds if v[0] > e['x']]
+                if left_vals and right_vals:
+                    scanned_totals.append({
+                        "line": line_val,
+                        "tu": left_vals[-1],
+                        "tb": right_vals[0]
+                    })
+
+    # Сканер фор с поддержкой знаков и целых/дробных значений
+    scanned_handicaps = []
+    for e in elements:
+        if y_hc <= e['y'] < y_combo:
+            clean_t = e['text'].replace(',', '.').replace(' ', '')
+            if re.match(r'^[-+]?[0-9](\.[05])?$', clean_t):
+                try:
+                    h_val = float(clean_t)
+                    row_odds = []
+                    for item in elements:
+                        if abs(item['y'] - e['y']) <= 15:
+                            c_text = item['text'].replace(',', '.').replace(' ', '')
+                            found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                            for f_num in found:
+                                try:
+                                    val = float(f_num)
+                                    if 1.01 <= val <= 50.0:
+                                        row_odds.append((item['x'], val))
+                                except ValueError:
+                                    continue
+                    row_odds.sort(key=lambda x: x[0])
+                    left_vals = [v[1] for v in row_odds if v[0] < e['x']]
+                    right_vals = [v[1] for v in row_odds if v[0] > e['x']]
+                    if left_vals and right_vals:
+                        scanned_handicaps.append({
+                            "line": h_val,
+                            "h1": left_vals[-1],
+                            "h2": right_vals[0]
+                        })
+                except ValueError:
+                    continue
+
+    # Базовый тотал для калибровки xG
+    k_tu25, k_tb25 = None, None
+    for t in scanned_totals:
+        if t["line"] == 2.5:
+            k_tu25, k_tb25 = t["tu"], t["tb"]
+            break
+    if not k_tu25 and scanned_totals:
+        k_tu25, k_tb25 = scanned_totals[0]["tu"], scanned_totals[0]["tb"]
 
     return {
         "match": match_title,
         "k_p1": k_p1, "k_x": k_x, "k_p2": k_p2,
         "k_tu25": k_tu25, "k_tb25": k_tb25,
-        "handicaps": odds_handicaps,
-        "combos": odds_combos,
+        "scanned_totals": scanned_totals,
+        "scanned_handicaps": scanned_handicaps,
         "form_tokens": form_tokens
     }
 
@@ -136,10 +208,11 @@ def execute_v31_audit(data: dict) -> str:
     xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
     xG_2 = max(0.3, xG_total - xG_1)
 
-    grid = np.zeros((6, 6))
+    # Генерация матрицы Пуассона 8x8 для точного покрытия верховых матчей
+    grid = np.zeros((8, 8))
     score_probs = []
-    for i in range(6):
-        for j in range(6):
+    for i in range(8):
+        for j in range(8):
             prob = poisson.pmf(i, xG_1) * poisson.pmf(j, xG_2) * 100
             grid[i, j] = prob
             score_probs.append(((i, j), prob))
@@ -155,28 +228,50 @@ def execute_v31_audit(data: dict) -> str:
     if 69.0 <= top4_prob <= 72.0 and (top4_prob + 3.0) > 72.0:
         cascade_passed = False
 
-    teams = data['match'].split('-') if '-' in data['match'] else ["Команда 1", "Команда 2"]
-    t1, t2 = teams[0].strip(), teams[1].strip() if len(teams) > 1 else "Команда 2"
+    # Безопасное разделение названий команд через любое тире
+    teams = re.split(r'\s*[-—–]\s*', data['match'])
+    t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
+    t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
 
     if not cascade_passed:
         return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Причина: Нарушен каскадный лимит матрицы Пуассона]"
 
+    # ПОЛНЫЙ ПУЛ РЫНКОВ С МАТЕМАТИЧЕСКИ ВЫВЕРЕННЫМИ ВЕРОЯТНОСТЯМИ
     markets_to_test = [
-        {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i > j)},
-        {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i == j)},
-        {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i < j)},
+        {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i > j)},
+        {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i == j)},
+        {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if i < j)},
     ]
 
-    if data["k_tb25"]:
-        markets_to_test.append({"name": "Тотал больше (2.5)", "odds": data["k_tb25"], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (i + j) > 2.5)})
-    if data["k_tu25"]:
-        markets_to_test.append({"name": "Тотал меньше (2.5)", "odds": data["k_tu25"], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (i + j) < 2.5)})
+    # Добавление всех отсканированных линий тоталов
+    for t_item in data.get("scanned_totals", []):
+        line = t_item["line"]
+        k_tu = t_item["tu"]
+        k_tb = t_item["tb"]
+        markets_to_test.append({
+            "name": f"Тотал меньше ({line})", 
+            "odds": k_tu, 
+            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (i + j) < line)
+        })
+        markets_to_test.append({
+            "name": f"Тотал больше ({line})", 
+            "odds": k_tb, 
+            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (i + j) > line)
+        })
 
-    if len(data["handicaps"]) >= 2:
-        markets_to_test.append({"name": "Фора (по котировке)", "odds": data["handicaps"][-1], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i != j)})
-
-    if len(data["combos"]) >= 1:
-        markets_to_test.append({"name": "Комбо-рынок (П1/ТМ или П1/ТБ)", "odds": data["combos"][0], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (i > j) and (i + j < 3.5))})
+    # Добавление фор с точным расчетом по разнице голов (i - j > -H)
+    for h_item in data.get("scanned_handicaps", []):
+        h_val = h_item["line"]
+        markets_to_test.append({
+            "name": f"Фора 1 ({h_val:+.1f})", 
+            "odds": h_item["h1"], 
+            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (i - j) > -h_val)
+        })
+        markets_to_test.append({
+            "name": f"Фора 2 ({-h_val:+.1f})", 
+            "odds": h_item["h2"], 
+            "real_prob": sum(grid[i, j] for i in range(8) for j in range(8) if (j - i) > h_val)
+        })
 
     best_pick = None
     max_margin_val = -999.0
@@ -185,7 +280,7 @@ def execute_v31_audit(data: dict) -> str:
     for m in markets_to_test:
         odds = m["odds"]
         real_prob = m["real_prob"]
-        real_prob_min = real_prob - 3.0
+        real_prob_min = real_prob - 3.0  # Дисперсионный буфер -3%
         implied_prob = (1 / odds) * 100
         
         if odds >= 2.10:
@@ -209,7 +304,7 @@ def execute_v31_audit(data: dict) -> str:
         form_bonus = (wins_count - losses_count) * 2
 
     if not best_pick:
-        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по видимым рынкам]"
+        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков]"
 
     market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
     confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
@@ -217,11 +312,15 @@ def execute_v31_audit(data: dict) -> str:
 
     vector_lock = "Верховой" if data["k_tb25"] and data["k_tb25"] < 1.75 else "Стандартный"
 
-    # Формирование безопасного отчета по Шагам 0–6
+    totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data["scanned_totals"]]) if data["scanned_totals"] else "Не найдены"
+    hc_str = ", ".join([f"{h['line']:+.1f} (к1:{h['h1']}/к2:{h['h2']})" for h in data["scanned_handicaps"]]) if data["scanned_handicaps"] else "Не найдены"
+
     report = f"""<b>Шаг 0: Калибровка и привязка котировок</b>
-- П1 = {k1}, Х = {kx}, П2 = {k2}
-- ТМ(2.5) = {data.get("k_tu25")}, ТБ(2.5) = {data.get("k_tb25")}
-- xG: Команда 1 ({xG_1:.2f}) / Команда 2 ({xG_2:.2f}) | Сумма: {xG_total:.2f}
+- <b>Матч</b>: {t1} — {t2}
+- <b>1X2</b>: П1={k1}, Х={kx}, П2={k2}
+- <b>Тоталы (все линии)</b>: [{totals_str}]
+- <b>Форы (все линии)</b>: [{hc_str}]
+- xG: {t1} ({xG_1:.2f}) / {t2} ({xG_2:.2f}) | Сумма: {xG_total:.2f}
 - Вектор матча: {vector_lock}
 
 <b>Шаг 1: Матрица Пуассона и каскадный контроль</b>
