@@ -55,8 +55,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
-    # СТАБИЛИЗИРОВАННЫЙ И ИНТЕЛЛЕКТУАЛЬНЫЙ СКАНЕР ФОРМЫ КОМАНД ПО КООРДИНАТАМ
-    potential_form_chars = ['В', 'Н', 'П', 'W', 'D', 'L', 'B', 'X']
+    # СТАБИЛИЗИРОВАННЫЙ СКАНЕР ФОРМЫ (Только русские буквы + латинские эквиваленты V, H, N, P без лишних W/D/L/B)
+    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P']
     t1_form_raw = []
     t2_form_raw = []
 
@@ -65,8 +65,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         if 180 <= e['y'] <= 300:
             txt = e['text'].upper().strip()
             for char in txt:
-                if char in potential_form_chars or char in ['В', 'Н', 'П']:
-                    clean_char = char.replace('B', 'В').replace('W', 'В').replace('D', 'Н').replace('L', 'П').replace('X', 'Н')
+                if char in form_allowed_chars:
+                    clean_char = char.replace('V', 'В').replace('H', 'Н').replace('N', 'Н').replace('P', 'П')
                     if clean_char in ['В', 'Н', 'П']:
                         if e['x'] < screen_center_x:
                             t1_form_raw.append({'x': e['x'], 'char': clean_char})
@@ -123,6 +123,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
     # Универсальный сканер тоталов по паттерну
     scanned_totals = []
+    y_max_totals = y_1x2  # Будем фиксировать нижнюю границу тоталов
     for e in elements:
         if e['y'] > y_1x2:
             clean_t = e['text'].replace(',', '.').replace(' ', '')
@@ -153,15 +154,21 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                                 "tu": left_vals[-1],
                                 "tb": right_vals[0]
                             })
+                            if e['y'] > y_max_totals:
+                                y_max_totals = e['y']
                 except ValueError:
                     continue
 
-    # Сканер фор (Поддержка знаков, дробных форий и форы 0)
+    # ЖЕСТКОЕ ПРАВИЛО: Блок фор должен начинаться ниже исходов 1X2 и ниже тоталов (если они есть)
+    y_handicap_start = max(y_1x2 + 100, y_max_totals + 30)
+
+    # Сканер фор (Строго ниже тоталов/1X2, требует знака + / - или строгого нуля)
     scanned_handicaps = []
     for e in elements:
-        if e['y'] > y_1x2:
+        if e['y'] > y_handicap_start:
             raw_txt = e['text'].replace(',', '.').replace(' ', '').rstrip('+')
-            if re.search(r'^([-+]?\d+(\.\d+)?)', raw_txt):
+            # Ищем только числа со знаками префикса (+/-) или изолированный ноль
+            if re.match(r'^([-+]\d+(\.\d+)?|0(\.0)?)$', raw_txt):
                 try:
                     match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
                     if match_num:
@@ -373,8 +380,8 @@ def execute_v31_audit(data: dict) -> str:
 
     form_bonus = 0
     if data["form_tokens"]:
-        wins_count = data["form_tokens"].count('В') + data["form_tokens"].count('W')
-        losses_count = data["form_tokens"].count('П') + data["form_tokens"].count('L')
+        wins_count = data["form_tokens"].count('В')
+        losses_count = data["form_tokens"].count('П')
         form_bonus = (wins_count - losses_count) * 2
 
     if not best_pick:
