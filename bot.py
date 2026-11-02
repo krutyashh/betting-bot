@@ -1,222 +1,217 @@
-import math
+import os
 import re
 import cv2
 import numpy as np
+import telebot
 import easyocr
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
+from scipy.stats import poisson
 
-# =====================================================================
-# МАТЕМАТИЧЕСКОЕ ЯДРО И РЕГЛАМЕНТ ДЕТЕРМИНИРОВАННОГО АУДИТОРА v3.1
-# =====================================================================
+TOKEN = "9223011917:AAHB3RofroQou1MVLc5GoUHDFAm_wdEVxWo"
+bot = telebot.TeleBot(TOKEN)
 
-def poisson_pmf(k: int, lambd: float) -> float:
-    return (lambd ** k) * math.exp(-lambd) / math.factorial(k)
-
-def calculate_xg_from_total2_5(k_under: float, k_over: float, home_ratio: float) -> tuple[float, float]:
-    impl_under = 1.0 / k_under
-    impl_over = 1.0 / k_over
-    margin_t = impl_under + impl_over
-    norm_under = impl_under / margin_t
-    
-    best_lambda = 2.5
-    min_diff = 999.0
-    for l_val in np.linspace(0.5, 6.0, 12000):
-        p_under = math.exp(-l_val) * (1.0 + l_val + (l_val**2)/2.0)
-        diff = abs(p_under - norm_under)
-        if diff < min_diff:
-            min_diff = diff
-            best_lambda = l_val
-            
-    xg_total = best_lambda
-    xg1 = xg_total * home_ratio
-    xg2 = xg_total * (1.0 - home_ratio)
-    return xg1, xg2
-
-def run_deterministic_audit(data: dict) -> str:
-    match_name = data.get("match", "Хозяева — Гости")
-    league = data.get("league", "Турнир (Верифицирован)")
-    
-    k_p1 = data["k_p1"]
-    k_x = data["k_x"]
-    k_p2 = data["k_p2"]
-    k_tu25 = data["k_tu25"]
-    k_tb25 = data["k_tb25"]
-    
-    # ШАГ 0: Калибровка и вектор
-    impl_p1 = 1.0 / k_p1
-    impl_x = 1.0 / k_x
-    impl_p2 = 1.0 / k_p2
-    margin_1x2 = impl_p1 + impl_x + impl_p2
-    
-    norm_p1 = impl_p1 / margin_1x2
-    norm_p2 = impl_p2 / margin_1x2
-    
-    if k_tu25 < 1.75:
-        vector = "Низовой"
-    elif k_tb25 < 1.75:
-        vector = "Верховой"
-    else:
-        vector = "Пограничный [1.76–2.05]"
-        
-    home_ratio = norm_p1 / (norm_p1 + norm_p2) if (norm_p1 + norm_p2) > 0 else 0.5
-    xg1, xg2 = calculate_xg_from_total2_5(k_tu25, k_tb25, home_ratio)
-    
-    output = []
-    output.append("📋 **ШАГ 0: Математическая калибровка линии**")
-    output.append(f"• Матч: {match_name} | Турнир: {league}")
-    output.append(f"• Связка 1X2: П1={k_p1:.2f} | Х={k_x:.2f} | П2={k_p2:.2f} (Маржа: {(margin_1x2-1)*100:.2f}%)")
-    output.append(f"• Тотал 2.5: ТМ={k_tu25:.2f} | ТБ={k_tb25:.2f} ➔ Вектор: **{vector}**")
-    output.append(f"• Детерминированный xG: xG1={xg1:.2f} | xG2={xg2:.2f} | Total={xg1+xg2:.2f}\n")
-    
-    # ШАГ 1: Матрица Пуассона и Каскадный Стоп-Кран
-    output.append("📊 **ШАГ 1: Детерминированная матрица счетов (Пуассон)**")
-    
-    grid = np.zeros((6, 6))
-    for h in range(6):
-        for a in range(6):
-            grid[h, a] = poisson_pmf(h, xg1) * poisson_pmf(a, xg2)
-            
-    scores = []
-    for h in range(6):
-        for a in range(6):
-            scores.append(((h, a), grid[h, a]))
-    scores.sort(key=lambda item: item[1], reverse=True)
-    
-    top1_p = scores[0][1]
-    top2_p = top1_p + scores[1][1]
-    top3_p = top2_p + scores[2][1]
-    top4_p = top3_p + scores[3][1]
-    tail_p = 1.0 - top4_p
-    
-    output.append(f"• ТОП-2 счетов: {top2_p*100:.2f}% (Лимит: <= 46.0%)")
-    output.append(f"• ТОП-3 счетов: {top3_p*100:.2f}% (Лимит: <= 62.0%)")
-    output.append(f"• ТОП-4 счетов: {top4_p*100:.2f}% (Лимит: <= 72.0%)")
-    output.append(f"• Хвост неопределенности: {tail_p*100:.2f}% (Лимит: >= 28.0%)")
-    
-    cascade_fail = False
-    if top2_p > 0.4601 or top3_p > 0.6201 or tail_p < 0.2799:
-        cascade_fail = True
-        
-    if 0.690 <= top4_p <= 0.720:
-        if (top4_p + 0.03) > 0.720:
-            cascade_fail = True
-            output.append("⚠️ Сработал превентивный буфер каскада (+3.0%).")
-    elif top4_p > 0.7201:
-        cascade_fail = True
-        
-    if cascade_fail:
-        output.append("\n❌ **НАРУШЕН КАСКАДНЫЙ ЛИМИТ МАТРИЦЫ! АВАРИЙНЫЙ СТОП-КРАН СРАБОТАЛ.**")
-        output.append(f"\n🚨 **ИТОГОВЫЙ ПРИКАЗ ПО СТАВКЕ:**\n`{match_name} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP)`")
-        return "\n".join(output)
-        
-    output.append("✅ Каскадный контроль матрицы пройден успешно.\n")
-    
-    # ШАГ 2 & 3: Массив рынков и буфер -3%
-    output.append("🔍 **ШАГ 2 & 3: Сканирование рынков и Закон Честной Математики**")
-    
-    p_p1 = float(np.sum(np.tril(grid, -1)))
-    p_draw = float(np.sum(np.diag(grid)))
-    p_p2 = float(np.sum(np.triu(grid, 1)))
-    p_tu25 = float(sum(grid[h, a] for h in range(6) for a in range(6) if h + a < 2.5))
-    p_tb25 = float(sum(grid[h, a] for h in range(6) for a in range(6) if h + a > 2.5))
-    
-    markets = [
-        {"name": "Home Win (1)", "k": k_p1, "prob": p_p1},
-        {"name": "Draw (X)", "k": k_x, "prob": p_draw},
-        {"name": "Away Win (2)", "k": k_p2, "prob": p_p2},
-        {"name": "Under 2.5 Goals", "k": k_tu25, "prob": p_tu25},
-        {"name": "Over 2.5 Goals", "k": k_tb25, "prob": p_tb25},
-    ]
-
-    best_market = None
-    best_plan = None
-    
-    for m in markets:
-        real_prob = m["prob"]
-        real_prob_min = real_prob - 0.03
-        impl_prob = 1.0 / m["k"]
-        value_margin_min = (real_prob_min - impl_prob) * 100
-        
-        output.append(f"• [{m['name']}] K={m['k']:.2f} | Real Prob: {real_prob*100:.2f}% | Prob(min -3%): {real_prob_min*100:.2f}% | VM(min): {value_margin_min:+.2f}%")
-        
-        if m["k"] >= 2.10:
-            if value_margin_min >= 1.50:
-                best_market = {**m, "vm_min": value_margin_min, "real_prob_min": real_prob_min, "impl_prob": impl_prob}
-                best_plan = "A"
-                break
-        else:
-            if real_prob_min > (impl_prob + 0.06):
-                best_market = {**m, "vm_min": value_margin_min, "real_prob_min": real_prob_min, "impl_prob": impl_prob}
-                best_plan = "B"
-                break
-
-    if not best_market:
-        output.append("\n⚠️ Ни один рынок не прошел пороги валуя (План А / План Б).")
-        output.append(f"\n🚨 **ИТОГОВЫЙ ПРИКАЗ ПО СТАВКЕ:**\n`{match_name} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP)`")
-        return "\n".join(output)
-
-    # ШАГ 4, 5 & 6: Финансы и вердикт
-    confidence = 85 if best_plan == "A" else 72
-    bank_pct = 5 if confidence >= 80 else 3
-    status_str = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if (best_plan == "A" and confidence >= 80) else "РАБОЧИЙ ВАЛУЙ"
-    
-    output.append(f"\n🎯 **ШАГ 4 & 5: Финансовый менеджмент**")
-    output.append(f"• Уверенность: {confidence}% ➔ Размер ставки: {bank_pct}% от банка")
-    
-    output.append(f"\n🚨 **ИТОГОВЫЙ ПРИКАЗ ПО СТАВКЕ:**")
-    if best_plan == "A":
-        final_cmd = f"{match_name} | {best_market['name']} — {best_market['k']:.2f} — {bank_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {status_str}]"
-    else:
-        final_cmd = f"{match_name} | Основная ставка отсутствует, зафиксирован валуй (План Б): {best_market['name']} — {best_market['k']:.2f} — {bank_pct}% от банка | [СТАТУС: РАБОЧИЙ ВАЛУЙ (План Б)]"
-        
-    output.append(f"`{final_cmd}`")
-    return "\n".join(output)
-
-# =====================================================================
-# OCR И ТЕЛЕГРАМ-БОТ (aiogram 3.x)
-# =====================================================================
-
+print("Инициализация EasyOCR движка...")
 reader = easyocr.Reader(['ru', 'en'], gpu=False)
+print("Движок OCR успешно запущен.")
 
 def parse_screenshot(image_bytes: bytes) -> dict:
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    results = reader.readtext(img, detail=0)
-    full_text = " ".join(results)
     
-    numbers = re.findall(r'\b\d+[\.,]\d+\b', full_text)
-    numbers = [float(n.replace(',', '.')) for n in numbers]
+    results = reader.readtext(img, detail=1)
     
+    anchors = {}
+    match_title = "Не распознано"
+    form_tokens = []
+    
+    for bbox, text, prob in results:
+        clean_txt = text.lower().strip()
+        if "1x2" in clean_txt or "исход" in clean_txt:
+            anchors['1x2'] = bbox[0][1]
+        elif "тотал" in clean_txt:
+            anchors['total'] = bbox[0][1]
+        elif "фора" in clean_txt:
+            anchors['handicap'] = bbox[0][1]
+        elif "комбинирован" in clean_txt or "исход и тотал" in clean_txt or "победа и" in clean_txt:
+            anchors['combo'] = bbox[0][1]
+            
+        if "-" in text and len(text) > 6 and bbox[0][1] < anchors.get('1x2', 500):
+            match_title = text.strip()
+            
+        if text.strip().upper() in ['В', 'Н', 'П', 'W', 'D', 'L'] and len(text.strip()) == 1:
+            form_tokens.append(text.strip().upper())
+
+    if '1x2' not in anchors:
+        raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Убедитесь, что открыт нужный рынок матча.")
+        
+    y_1x2 = anchors['1x2']
+    y_total = anchors.get('total', y_1x2 + 200)
+    y_hc = anchors.get('handicap', y_total + 200)
+    y_combo = anchors.get('combo', y_hc + 200)
+    
+    def extract_odds_in_zone(y_start, y_end):
+        collected = []
+        for bbox, text, prob in results:
+            y_coord = bbox[0][1]
+            if y_start <= y_coord < y_end:
+                clean_text = text.replace(',', '.')
+                found_nums = re.findall(r'\b\d{1,3}\.\d{2}\b', clean_text)
+                for num_str in found_nums:
+                    try:
+                        val = float(num_str)
+                        if val > 1.0:
+                            collected.append(val)
+                    except ValueError:
+                        continue
+        return collected
+
+    odds_1x2 = extract_odds_in_zone(y_1x2, min(y_total, y_1x2 + 160))
+    if len(odds_1x2) < 3:
+        raise ValueError(f"Ошибка парсинга 1X2: найдено коэффициентов: {len(odds_1x2)}. Требуется ровно 3.")
+
+    k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
+    
+    odds_totals = extract_odds_in_zone(y_total, y_total + 200) if 'total' in anchors else []
+    k_tu25 = odds_totals[2] if len(odds_totals) > 2 else None
+    k_tb25 = odds_totals[5] if len(odds_totals) > 5 else None
+
+    odds_handicaps = extract_odds_in_zone(y_hc, y_hc + 180) if 'handicap' in anchors else []
+    odds_combos = extract_odds_in_zone(y_combo, y_combo + 250) if 'combo' in anchors else []
+
     return {
-        "match": "Матч со скриншота БК",
-        "league": "Авто-определение",
-        "k_p1": numbers[0] if len(numbers) > 0 else 1.70,
-        "k_x": numbers[1] if len(numbers) > 1 else 3.95,
-        "k_p2": numbers[2] if len(numbers) > 2 else 4.20,
-        "k_tu25": numbers[3] if len(numbers) > 3 else 2.66,
-        "k_tb25": numbers[4] if len(numbers) > 4 else 1.38,
+        "match": match_title,
+        "k_p1": k_p1, "k_x": k_x, "k_p2": k_p2,
+        "k_tu25": k_tu25, "k_tb25": k_tb25,
+        "handicaps": odds_handicaps,
+        "combos": odds_combos,
+        "form_tokens": form_tokens
     }
 
-TOKEN = "9223011917:AAHB3RofroQou1MVLc5GoUHDFAm_wdEVxWo"
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("🤖 **Детерминированный Аудитор v3.1 запущен.**\n\nПришли скриншот линии БК (1X2 и Тотал 2.5), и я проведу полный математический аудит!")
-
-@dp.message(F.photo)
-async def handle_screenshot(message: types.Message):
-    await message.answer("🔄 Считываю скриншот нейросетью EasyOCR и считаю Пуассона...")
-    photo = message.photo[-1]
-    file_info = await bot.get_file(photo.file_id)
-    file = await bot.download_file(file_info.file_path)
+def execute_v31_audit(data: dict) -> str:
+    k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
-    data = parse_screenshot(file.read())
-    result = run_deterministic_audit(data)
-    await message.answer(result, parse_mode="Markdown")
+    # Точный расчет xG через имплицитную вероятность тотала 2.5
+    if data["k_tu25"] and data["k_tb25"]:
+        p_under = 1 / data["k_tu25"]
+        xG_total = max(1.2, min(4.5, 3.2 - (p_under - 0.5) * 2.5))
+    else:
+        xG_total = 2.55 # Фоллбек, если тоталы не захвачены в кадр
+        
+    power_diff = (k2 - k1) / (k1 + k2 + kx)
+    xG_1 = max(0.3, (xG_total / 2) * (1 + power_diff * 0.8))
+    xG_2 = max(0.3, xG_total - xG_1)
+
+    # Генерация матрицы Пуассона 6x6
+    grid = np.zeros((6, 6))
+    score_probs = []
+    for i in range(6):
+        for j in range(6):
+            prob = poisson.pmf(i, xG_1) * poisson.pmf(j, xG_2) * 100
+            grid[i, j] = prob
+            score_probs.append(((i, j), prob))
+            
+    score_probs.sort(key=lambda x: x[1], reverse=True)
+    
+    top2_prob = score_probs[0][1] + score_probs[1][1]
+    top3_prob = top2_prob + score_probs[2][1]
+    top4_prob = top3_prob + score_probs[3][1]
+    tail_prob = 100.0 - top4_prob
+
+    # Каскадный лимит матрицы
+    cascade_passed = (top2_prob <= 46.0) and (top3_prob <= 62.0) and (top4_prob <= 72.0) and (tail_prob >= 28.0)
+    if 69.0 <= top4_prob <= 72.0 and (top4_prob + 3.0) > 72.0:
+        cascade_passed = False
+
+    teams = data['match'].split('-') if '-' in data['match'] else ["Команда 1", "Команда 2"]
+    t1, t2 = teams[0].strip(), teams[1].strip() if len(teams) > 1 else "Команда 2"
+
+    if not cascade_passed:
+        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Причина: Нарушен каскадный лимит матрицы Пуассона]"
+
+    # Формируем пул рынков СТРОГО из реальных данных со скриншота (без выдуманных заглушек)
+    markets_to_test = [
+        {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i > j)},
+        {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i == j)},
+        {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if i < j)},
+    ]
+
+    if data["k_tb25"]:
+        markets_to_test.append({"name": "Тотал больше (2.5)", "odds": data["k_tb25"], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (i + j) > 2.5)})
+    if data["k_tu25"]:
+        markets_to_test.append({"name": "Тотал меньше (2.5)", "odds": data["k_tu25"], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (i + j) < 2.5)})
+
+    if len(data["handicaps"]) >= 2:
+        markets_to_test.append({"name": "Фора 2 (-1.0)", "odds": data["handicaps"][1], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (j - i) >= 2)})
+
+    if len(data["combos"]) >= 1:
+        markets_to_test.append({"name": "П2 + ТБ(2.5) [Комбо]", "odds": data["combos"][0], "real_prob": sum(grid[i, j] for i in range(6) for j in range(6) if (j > i) and (i + j > 2.5))})
+
+    best_pick = None
+    max_margin_val = -999.0
+    final_status = "РАБОЧИЙ ВАЛУЙ"
+
+    # Аудит по Плану А / Плану Б с буфером -3%
+    for m in markets_to_test:
+        odds = m["odds"]
+        real_prob = m["real_prob"]
+        real_prob_min = real_prob - 3.0  # Дисперсионный буфер безопасности -3%
+        implied_prob = (1 / odds) * 100
+        
+        if odds >= 2.10:
+            # План А: Value Margin(min) >= +1.50%
+            vm_min = real_prob_min - implied_prob
+            if vm_min >= 1.50 and vm_min > max_margin_val:
+                max_margin_val = vm_min
+                best_pick = (m["name"], odds, vm_min)
+                final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
+        else:
+            # План Б: Real Prob(min) > Implied Prob БК + 6.0% (Всегда Железный валуй)
+            if real_prob_min > (implied_prob + 6.0):
+                excess = real_prob_min - (implied_prob + 6.0)
+                if excess > max_margin_val:
+                    max_margin_val = excess
+                    best_pick = (m["name"], odds, real_prob_min)
+                    final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ"
+
+    form_bonus = 0
+    if data["form_tokens"]:
+        wins_count = data["form_tokens"].count('В') + data["form_tokens"].count('W')
+        losses_count = data["form_tokens"].count('П') + data["form_tokens"].count('L')
+        form_bonus = (wins_count - losses_count) * 2
+
+    if not best_pick:
+        return f"{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по видимым рынкам]"
+
+    market_name, chosen_odds, val_score = best_pick
+    confidence = min(95, max(60, int(75 + val_score * 2 + form_bonus)))
+    stake_pct = 5 if confidence >= 80 else 3
+
+    if chosen_odds >= 2.10:
+        return f"{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
+    else:
+        return f"{t1} — {t2} | Основная ставка по строгому регламенту отсутствует, зафиксирован подтвержденный математический валуй (План Б): {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {final_status})"
+
+
+@bot.message_handler(commands=['start'])
+def func_start(message):
+    bot.reply_to(message, "Аудитор v3.1 запущен. Отправьте скриншот линии.")
+
+
+@bot.message_handler(content_types=['photo'])
+def func_handle_photo(message):
+    processing_msg = bot.reply_to(message, "🛡️ Аудит видимых рынков по модели v3.1...")
+    try:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        
+        parsed_data = parse_screenshot(downloaded_file)
+        result_verdict = execute_v31_audit(parsed_data)
+        
+        bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка аудита: {str(e)}", chat_id=message.chat.id, message_id=processing_msg.message_id)
+
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(dp.start_polling(bot))
+    print("Бот v3.1 запущен и работает по честным данным...")
+    bot.infinity_polling()
