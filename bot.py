@@ -10,7 +10,7 @@ from scipy.stats import poisson
 # Подавляем технические предупреждения PyTorch и Deprecation Warnings для чистоты логов
 warnings.filterwarnings("ignore", category=UserWarning)
 
-TOKEN = "9223011917:AAHB3RofroQou1MVLc5GoUHDFAm_wdEVxWo"
+TOKEN = "9223011917:AAF2aonZ5kaX9TkD7fx0kz6U2gFzc52Cx_Y"
 bot = telebot.TeleBot(TOKEN)
 
 print("Инициализация EasyOCR движка...")
