@@ -1,6 +1,7 @@
 import os
 import re
 import warnings
+import traceback
 import cv2
 import numpy as np
 import telebot
@@ -73,9 +74,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Откройте основную роспись матча.")
         
     y_1x2 = anchors['1x2']
-    y_total = anchors.get('total', y_1x2 + 250)
-    y_hc = anchors.get('handicap', y_total + 250)
-    y_combo = anchors.get('combo', y_hc + 250)
     
     # Универсальная функция извлечения чисел (коэффициентов) в заданном вертикальном диапазоне
     def extract_odds_in_zone(y_start, y_end, zone_name=""):
@@ -83,7 +81,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         for e in elements:
             if y_start <= e['y'] < y_end:
                 clean_t = e['text'].replace(',', '.')
-                # ИСПРАВЛЕНИЕ: \d{1,2} захватывает и .0 (например, 12.0), и .25, и .80
+                # \d{1,2} захватывает и .0 (например, 12.0), и .25, и .80
                 found_nums = re.findall(r'\b\d{1,3}\.\d{1,2}\b', clean_t)
                 for num_str in found_nums:
                     try:
@@ -101,9 +99,9 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     # Нижняя граница с запасом для сбора всего экрана
     max_y = max([e['y'] for e in elements]) + 100 if elements else 1000
 
-    # 3. Извлекаем блоки по зонам
+    # 3. Извлекаем блоки по зонам (для 1X2 берем строго диапазон под заголовком: от y_1x2 до y_1x2 + 100)
     print("--- [Детальный разбор зон росписи] ---")
-    odds_1x2 = extract_odds_in_zone(y_1x2, y_total, "1X2")
+    odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 100, "1X2")
     if len(odds_1x2) < 3:
         print(f"❌ ОШИБКА ПАРСИНГА 1X2: Найдено котировок: {len(odds_1x2)}. Требуется ровно 3.")
         print("================ [OCR DEBUG: КОНЕЦ РАСПОЗНАВАНИЯ (ПРЕРВАНО)] ================\n")
@@ -111,15 +109,18 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    # Тоталы (берем ТМ 2.5 и ТБ 2.5 из блока тоталов)
+    # Границы для остальных блоков через безопасный поиск ниже 1X2
+    y_total = anchors.get('total', y_1x2 + 120)
+    y_hc = anchors.get('handicap', y_total + 200)
+    y_combo = anchors.get('combo', y_hc + 200)
+
+    # Тоталы
     odds_totals = extract_odds_in_zone(y_total, y_hc, "TOTALS")
     k_tu25 = odds_totals[2] if len(odds_totals) > 2 else (odds_totals[0] if len(odds_totals) > 0 else None)
     k_tb25 = odds_totals[5] if len(odds_totals) > 5 else (odds_totals[1] if len(odds_totals) > 1 else None)
 
-    # Форы (захватываем все котировки из зоны фор)
+    # Форы и Комбо
     odds_handicaps = extract_odds_in_zone(y_hc, y_combo, "HANDICAPS")
-
-    # Комбо-ставки (исход и тотал)
     odds_combos = extract_odds_in_zone(y_combo, max_y, "COMBOS")
 
     print("----------------------------------------------------------------------------")
@@ -256,7 +257,11 @@ def func_handle_photo(message):
         
         bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id)
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка аудита: {str(e)}", chat_id=message.chat.id, message_id=processing_msg.message_id)
+        tb_str = traceback.format_exc()
+        error_message = f"❌ Ошибка аудита:\n<pre>{tb_str}</pre>"
+        if len(error_message) > 4000:
+            error_message = error_message[:4000] + "\n...[обрезано]"
+        bot.edit_message_text(error_message, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
 
 
 if __name__ == "__main__":
