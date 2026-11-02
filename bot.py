@@ -37,54 +37,42 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         clean_txt = text.strip()
         elements.append({'y': y_min, 'x': x_min, 'text': clean_txt})
         
-        # Форма команд (буквы В, Н, П, W, D, L в кружках под логотипами)
-        if clean_txt.upper() in ['В', 'Н', 'П', 'W', 'D', 'L'] and len(clean_txt) == 1:
-            form_tokens.append(clean_txt.upper())
+        # Сбор формы команд (буквы В, Н, П, W, D, L в кружках под названиями)
+        if clean_txt.upper() in ['В', 'Н', 'П', 'W', 'D', 'L', 'B'] and len(clean_txt) == 1:
+            if 200 <= y_min <= 320:
+                form_tokens.append(clean_txt.upper().replace('B', 'В'))
 
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
-    # ТОЧНОЕ ОПРЕДЕЛЕНИЕ НАЗВАНИЯ МАТЧА (Ищем строку с тире строго в верхней зоне матча, исключая время приложения)
+    # СТРОГОЕ И ТОЧНОЕ ОПРЕДЕЛЕНИЕ НАЗВАНИЯ МАТЧА
     match_title = "Команда 1 — Команда 2"
     for e in elements:
-        if re.search(r'[-—–]', e['text']) and len(e['text']) > 5 and 130 <= e['y'] <= 250:
+        if re.search(r'[-—–]', e['text']) and len(e['text']) > 5 and 170 <= e['y'] <= 260:
             match_title = e['text']
             break
             
     if match_title == "Команда 1 — Команда 2":
         team_candidates = []
         for e in elements:
-            if 130 <= e['y'] <= 250:
+            if 170 <= e['y'] <= 260:
                 txt = e['text']
-                if not re.search(r'(тур|часть|сегодня|вчера|\d{2}:\d{2})', txt.lower()) and len(txt) > 2:
+                if not re.search(r'(тур|часть|сегодня|вчера|футбол|лига|\d{2}:\d{2})', txt.lower()) and len(txt) > 2:
                     team_candidates.append(txt)
         if len(team_candidates) >= 2:
             match_title = f"{team_candidates[0]} — {team_candidates[1]}"
 
-    # 2. Ищем координаты ключевых заголовков (якорей блоков)
-    anchors = {}
+    # Ищем стартовый якорь блока 1X2
+    y_1x2 = None
     for el in elements:
         t_low = el['text'].lower().replace(" ", "").replace(".", "")
-        
-        if ('исход1x2' in t_low or 'исход1х2' in t_low) and '1x2' not in anchors:
-            anchors['1x2'] = el['y']
-        elif 'тотал' in t_low and 'total' not in anchors and 'комбинирован' not in t_low:
-            anchors['total'] = el['y']
-        elif 'фора' in t_low and 'handicap' not in anchors:
-            anchors['handicap'] = el['y']
-        elif ('комбинирован' in t_low or 'исходитотал' in t_low) and 'combo' not in anchors:
-            anchors['combo'] = el['y']
+        if 'исход1x2' in t_low or 'исход1х2' in t_low:
+            y_1x2 = el['y']
+            break
 
-    if '1x2' not in anchors:
-        raise ValueError("На скриншоте не найден блок 'Исход 1X2'. Откройте основную роспись матча.")
-        
-    y_1x2 = anchors['1x2']
-    y_total = anchors.get('total', y_1x2 + 120)
-    y_hc = anchors.get('handicap', y_total + 220)
-    y_combo = anchors.get('combo', y_hc + 220)
-    max_y = max([e['y'] for e in elements]) + 100 if elements else 1000
+    if y_1x2 is None:
+        y_1x2 = 300
 
-    # Универсальная функция извлечения коэффициентов
     def extract_odds_in_zone(y_start, y_end):
         zone_items = []
         for e in elements:
@@ -101,28 +89,27 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         zone_items.sort(key=lambda item: item[0])
         return [item[1] for item in zone_items]
 
-    # 3. Извлекаем блоки по зонам
+    # Извлекаем 1X2 (обязательно)
     odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 100)
+    if len(odds_1x2) < 3:
+        odds_1x2 = extract_odds_in_zone(y_1x2 - 50, y_1x2 + 150)
+    
     if len(odds_1x2) < 3:
         raise ValueError(f"Ошибка парсинга 1X2: найдено коэффициентов: {len(odds_1x2)}. Требуется ровно 3.")
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    all_x = [e['x'] for e in elements]
-    screen_center_x = (min(all_x) + max(all_x)) / 2 if all_x else 200
-
-    # СУПЕР-ТОЧНЫЙ СКАЛЕР ТОТАЛОВ (Ищет маркеры вида 2.5, 3.5 строго в зоне тоталов)
+    # УНИВЕРСАЛЬНЫЙ СКАНЕР ТОТАЛОВ ПО ПАТТЕРНУ (Ищет линии вида X.5 ниже 1X2)
     scanned_totals = []
     for e in elements:
-        if y_total <= e['y'] < y_hc:
+        if e['y'] > y_1x2:
             clean_t = e['text'].replace(',', '.').replace(' ', '')
-            if re.match(r'^[0-5]\.[05]$', clean_t):
+            if re.match(r'^[0-5]\.5$', clean_t):
                 try:
                     line_val = float(clean_t)
-                    if not (0.5 <= line_val <= 10.5): continue
                     row_odds = []
                     for item in elements:
-                        if abs(item['y'] - e['y']) <= 14:
+                        if abs(item['y'] - e['y']) <= 12:
                             c_text = item['text'].replace(',', '.').replace(' ', '')
                             found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
                             for f_num in found:
@@ -138,30 +125,38 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     left_vals = [v[1] for v in row_odds if v[0] < e['x']]
                     right_vals = [v[1] for v in row_odds if v[0] > e['x']]
                     if left_vals and right_vals:
-                        scanned_totals.append({
-                            "line": line_val,
-                            "tu": left_vals[-1],
-                            "tb": right_vals[0]
-                        })
+                        if not any(t['line'] == line_val for t in scanned_totals):
+                            scanned_totals.append({
+                                "line": line_val,
+                                "tu": left_vals[-1],
+                                "tb": right_vals[0]
+                            })
                 except ValueError:
                     continue
 
-    # СУПЕР-ТОЧНЫЙ СКАЛЕР ФОР (Ищет маркеры фор вида -2.5, +1.5 строго в зоне фор)
+    # УНИВЕРСАЛЬНЫЙ СКАНЕР ФОР ПО ПАТТЕРНУ (Строго со знаком + или - и суффиксом плюс/минус)
     scanned_handicaps = []
     for e in elements:
-        if y_hc <= e['y'] < y_combo:
-            clean_t = e['text'].replace(',', '.').replace(' ', '').replace('+', '')
-            if re.match(r'^[-+]?[0-9]\.[05]$', clean_t) or re.match(r'^[-+]?[0-9]$', clean_t):
+        if e['y'] > y_1x2:
+            clean_t = e['text'].replace(',', '.').replace(' ', '').replace('+', '').replace('-', '')
+            # Форы на скриншотах Winline имеют вид -2.5+ или аналогичные маркеры
+            if re.match(r'^[0-9](\.[05])?$', clean_t) and ('+' in e['text'] or '-' in e['text']):
                 try:
-                    h_val = float(clean_t)
+                    # Восстанавливаем знак из оригинального текста
+                    raw_txt = e['text']
+                    sign = -1 if '-' in raw_txt else 1
+                    h_val = float(re.findall(r'\d+\.?\d*', raw_txt)[0]) * sign
+                    
                     row_odds = []
                     for item in elements:
-                        if abs(item['y'] - e['y']) <= 14:
+                        if abs(item['y'] - e['y']) <= 12:
                             c_text = item['text'].replace(',', '.').replace(' ', '')
                             found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
                             for f_num in found:
                                 try:
                                     val = float(f_num)
+                                    if val == abs(h_val) and abs(item['x'] - e['x']) < 15:
+                                        continue
                                     if 1.01 <= val <= 50.0:
                                         row_odds.append((item['x'], val))
                                 except ValueError:
@@ -170,12 +165,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     left_vals = [v[1] for v in row_odds if v[0] < e['x']]
                     right_vals = [v[1] for v in row_odds if v[0] > e['x']]
                     if left_vals and right_vals:
-                        scanned_handicaps.append({
-                            "line": h_val,
-                            "h1": left_vals[-1],
-                            "h2": right_vals[0]
-                        })
-                except ValueError:
+                        if not any(h['line'] == h_val for h in scanned_handicaps):
+                            scanned_handicaps.append({
+                                "line": h_val,
+                                "h1": left_vals[-1],
+                                "h2": right_vals[0]
+                            })
+                except (ValueError, IndexError):
                     continue
 
     # Базовый тотал для калибровки xG
