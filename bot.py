@@ -55,14 +55,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
-    # СТАБИЛИЗИРОВАННЫЙ СКАНЕР ФОРМЫ (Только русские буквы + латинские эквиваленты V, H, N, P без лишних W/D/L/B)
+    # СТАБИЛИЗИРОВАННЫЙ СКАНЕР ФОРМЫ (Расширена зона Y до 100-350 с защитой от пустых данных)
     form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P']
     t1_form_raw = []
     t2_form_raw = []
 
     for e in elements:
-        # Узкая зона поиска по вертикали под логотипами команд
-        if 180 <= e['y'] <= 300:
+        if 100 <= e['y'] <= 350:
             txt = e['text'].upper().strip()
             for char in txt:
                 if char in form_allowed_chars:
@@ -219,23 +218,31 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 def execute_v31_audit(data: dict) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
+    # Строгий расчет xG с защитой от ZeroDivisionError
     try:
-        implied_p1 = 1 / k1
-        implied_kx = 1 / kx
-        implied_p2 = 1 / k2
+        implied_p1 = 1 / k1 if k1 > 0 else 0
+        implied_kx = 1 / kx if kx > 0 else 0
+        implied_p2 = 1 / k2 if k2 > 0 else 0
         sum_1x2 = implied_p1 + implied_kx + implied_p2
         
-        p1_norm = implied_p1 / sum_1x2
-        p2_norm = implied_p2 / sum_1x2
+        if sum_1x2 > 0:
+            p1_norm = implied_p1 / sum_1x2
+            p2_norm = implied_p2 / sum_1x2
+        else:
+            p1_norm, p2_norm = 0.33, 0.33
         
-        if data["k_tu25"] and data["k_tb25"]:
+        if data["k_tu25"] and data["k_tb25"] and data["k_tb25"] > 0 and data["k_tu25"] > 0:
             impl_tb = 1 / data["k_tb25"]
             impl_tm = 1 / data["k_tu25"]
-            xG_total = max(1.0, min(5.0, 2.5 * (impl_tb / (impl_tb + impl_tm) + 0.5)))
+            if (impl_tb + impl_tm) > 0:
+                xG_total = max(1.0, min(5.0, 2.5 * (impl_tb / (impl_tb + impl_tm) + 0.5)))
+            else:
+                xG_total = 2.50
         else:
             xG_total = 2.50
             
-        xG_1 = max(0.2, xG_total * (p1_norm / (p1_norm + p2_norm + 0.001)))
+        denom = p1_norm + p2_norm + 0.001
+        xG_1 = max(0.2, xG_total * (p1_norm / denom))
         xG_2 = max(0.2, xG_total - xG_1)
     except ZeroDivisionError:
         xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
@@ -358,7 +365,7 @@ def execute_v31_audit(data: dict) -> str:
 
             real_prob = m["real_prob"]
             real_prob_min = real_prob - 3.0
-            implied_prob = (1 / odds) * 100
+            implied_prob = (1 / odds) * 100 if odds > 0 else 100
             
             if odds >= 2.10:
                 vm_min = real_prob_min - implied_prob
