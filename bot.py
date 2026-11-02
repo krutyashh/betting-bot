@@ -52,11 +52,11 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
-    # 2. Ищем координаты ключевых заголовков (якорей блоков)
+    # 2. Ищем координаты ключевых заголовков (якорей блоков) с поддержкой пробелов
     anchors = {}
     for el in elements:
-        t_low = el['text'].lower()
-        if ('1x2' in t_low or 'исход' in t_low) and '1x2' not in anchors:
+        t_low = el['text'].lower().replace(" ", "").replace(" ", "")
+        if ('1x2' in t_low or 'исход' in t_low or '1х2' in t_low) and '1x2' not in anchors:
             anchors['1x2'] = el['y']
         elif 'тотал' in t_low and 'total' not in anchors and 'комбинирован' not in t_low:
             anchors['total'] = el['y']
