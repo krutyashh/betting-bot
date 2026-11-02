@@ -40,7 +40,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     
     # ПРАВИЛО 2: В шапке матча идем снизу вверх по строкам, ищем строку с командами по разделителю "пробел дефис пробел"
     match_title = "Команда 1 — Команда 2"
-    header_elements = [e for e in elements if 50 <= e['y'] <= 350]
+    header_elements = [e for e in elements if 40 <= e['y'] <= 350]
     header_elements_bottom_up = sorted(header_elements, key=lambda e: e['y'], reverse=True)
     
     screen_center_x = img.shape[1] / 2
@@ -55,9 +55,9 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
-    # СТРОГИЙ ПОИСК ФОРМЫ ПО СТРОКАМ (Построковая группировка по Y)
+    # СТАБИЛИЗИРОВАННЫЙ ПОИСК ФОРМЫ (Расширена зона Y до 350, погрешность строки до 15 пикселей)
     potential_form_chars = ['В', 'Н', 'П', 'W', 'D', 'L', 'B']
-    form_header_elements = [e for e in elements if 50 <= e['y'] <= 300]
+    form_header_elements = [e for e in elements if 40 <= e['y'] <= 350]
     
     rows = []
     for e in form_header_elements:
@@ -65,7 +65,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         if txt_clean in potential_form_chars and len(txt_clean) == 1:
             placed = False
             for row in rows:
-                if abs(row[0]['y'] - e['y']) <= 8:
+                if abs(row[0]['y'] - e['y']) <= 15:
                     row.append(e)
                     placed = True
                     break
@@ -77,7 +77,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
     for row in rows:
         row.sort(key=lambda item: item['x'])
-        if len(row) >= 3:  # Строка должна содержать сгусток элементов формы
+        if len(row) >= 2:  # Допускаем мягкий сгусток от 2 символов в строке
             for e in row:
                 char = e['text'].upper().replace('B', 'В').replace('W', 'В').replace('D', 'Н').replace('L', 'П')
                 if e['x'] < screen_center_x:
@@ -165,12 +165,12 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 except ValueError:
                     continue
 
-    # Универсальный сканер фор (поддержка форы 0, целых и дробных значений со знаком)
+    # Безопасный сканер фор (поддержка фор со знаками, суффиксов '+', целых чисел и форы 0)
     scanned_handicaps = []
     for e in elements:
         if e['y'] > y_1x2:
-            raw_txt = e['text'].replace(',', '.').replace(' ', '')
-            if re.search(r'([-+]?\d+(\.\d+)?)', raw_txt):
+            raw_txt = e['text'].replace(',', '.').replace(' ', '').rstrip('+')
+            if re.search(r'^([-+]?\d+(\.\d+)?)', raw_txt):
                 try:
                     match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
                     if match_num:
@@ -308,6 +308,23 @@ def execute_v31_audit(data: dict) -> str:
                 "name": "Фора 2 (0)", 
                 "odds": h_item["h2"], 
                 "real_prob": (100.0 - prob_h1 - prob_draw) + (prob_draw * 0.5)
+            })
+        elif h_val.is_integer():
+            h_int = int(h_val)
+            prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > h_int)
+            prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) == h_int)
+            markets_to_test.append({
+                "name": f"Фора 1 ({h_val:+.1f})", 
+                "odds": h_item["h1"], 
+                "real_prob": prob_win + (prob_push * 0.5)
+            })
+            
+            prob_win_2 = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > -h_int)
+            prob_push_2 = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) == -h_int)
+            markets_to_test.append({
+                "name": f"Фора 2 ({(-h_val):+.1f})", 
+                "odds": h_item["h2"], 
+                "real_prob": prob_win_2 + (prob_push_2 * 0.5)
             })
         else:
             markets_to_test.append({
