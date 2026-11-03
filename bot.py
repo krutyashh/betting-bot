@@ -17,7 +17,7 @@ GEMINI_KEY = os.getenv('GEMINI_KEY')
 
 # Инициализация Gemini API
 genai.configure(api_key=GEMINI_KEY)
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 print("Gemini API успешно инициализирован.")
 
@@ -369,7 +369,7 @@ def execute_v31_audit(data: dict) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.1 (Gemini Vision + Форм-фильтры) запущен. Отправьте скриншот линии.")
+    bot.reply_to(message, "Аудитор v3.1 (Gemini Vision + Advanced Form Rules) запущен. Отправьте скриншот линии.")
 
 
 @bot.message_handler(content_types=['photo'])
@@ -385,7 +385,10 @@ def func_handle_photo(message):
         bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
     except Exception as e:
         tb_str = traceback.format_exc()
-        error_message = f"❌ Ошибка аудита:\n<pre>{tb_str}</pre>"
+        # Безопасное экранирование тегов для HTML в Telegram
+        safe_tb = tb_str.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        error_message = f"❌ <b>Ошибка аудита:</b>\n<pre>{safe_tb}</pre>"
+        
         if len(error_message) > 4000:
             error_message = error_message[:4000] + "\n...[обрезано]"
         bot.edit_message_text(error_message, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
