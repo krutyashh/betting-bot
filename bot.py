@@ -47,7 +47,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     for e in header_elements_bottom_up:
         txt = e['text']
         if re.search(r'\s+[-—–]\s+', txt):
-            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера|трансляция)', txt.lower()):
+            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера)', txt.lower()):
                 parts = re.split(r'\s+[-—–]\s+', txt)
                 if len(parts) >= 2:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
@@ -65,20 +65,21 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         y_1x2 = 450
 
     # ==========================================
-    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (ПОД ЛОГОТИПАМИ)
+    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (ТОЧНЫЙ ПОИСК)
     # ==========================================
     form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2 найден на y={y_1x2}"]
-    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P', '8', 'B']
+    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P', 'B', 'X', 'W', 'D', 'Л']
     t1_form_raw = []
     t2_form_raw = []
 
+    # Ищем форму строго в зоне между шапкой матча и блоком 1X2
     for e in elements:
-        if 130 <= e['y'] <= 230:
+        if 100 <= e['y'] < y_1x2 - 30:
             txt_raw = e['text'].strip()
             txt_lower = txt_raw.lower()
-            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол', 'барнаул', 'дзержинск', 'динамо', 'химик']):
+            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол', 'ирбид', 'премьер']):
                 continue
-            if re.search(r'\d{2}:\d{2}', txt_raw) or re.search(r'\d{1,2}\.\d{1,2}', txt_raw):
+            if re.search(r'\d{2}:\d{2}', txt_raw) or re.search(r'\d{1,2}\.\d{1,2}', txt_raw) or re.search(r'\d+', txt_raw):
                 continue
             
             form_debug_lines.append(f"y={e['y']}, x={e['x']}, txt: '{txt_raw}'")
@@ -90,7 +91,10 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                                       .replace('N', 'Н')
                                       .replace('P', 'П')
                                       .replace('B', 'В')
-                                      .replace('8', 'Н'))
+                                      .replace('W', 'В')
+                                      .replace('D', 'Н')
+                                      .replace('X', 'Н')
+                                      .replace('Л', 'П'))
                     if clean_char in ['В', 'Н', 'П']:
                         if e['x'] < screen_center_x:
                             t1_form_raw.append({'x': e['x'], 'char': clean_char})
@@ -150,7 +154,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             elif 'фора' in t_low:
                 block_anchors.append({'type': 'handicap', 'y': e['y']})
 
-    # Сортируем якоря по вертикали сверху вниз
     block_anchors.sort(key=lambda b: b['y'])
 
     # 4. СКАНИРУЕМ БЛОК «ТОТАЛ»
@@ -193,8 +196,9 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (С УЧЕТОМ ЗНАКОВ СЛЕВА И СПРАВА)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (БЕЗ ДУБЛЕЙ)
     scanned_handicaps = []
+    seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
     if handicap_anchor:
         next_anchors = [b['y'] for b in block_anchors if b['y'] > handicap_anchor['y']]
@@ -208,26 +212,30 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     val_str = match_num.group(1)
                     val = float(val_str)
                     
-                    if raw_txt.startswith('-') or (raw_txt.find('-') != -1 and raw_txt.find('-') < raw_txt.find(val_str) and not raw_txt.startswith('+')):
-                        h1_val = -val
-                        h2_val = val
-                    elif raw_txt.startswith('+') or raw_txt.find('+') < raw_txt.find(val_str):
-                        h1_val = val
-                        h2_val = -val
+                    if val > 10.0:
+                        continue
+
+                    # Определяем знак форы
+                    has_minus_before = raw_txt.find('-') != -1 and raw_txt.find('-') < raw_txt.find(val_str)
+                    has_plus_before = raw_txt.find('+') != -1 and raw_txt.find('+') < raw_txt.find(val_str)
+
+                    if has_plus_before:
+                        h1_val, h2_val = val, -val
+                    elif has_minus_before:
+                        h1_val, h2_val = -val, val
                     else:
                         if val == 0.0:
-                            h1_val = 0.0
-                            h2_val = 0.0
+                            h1_val, h2_val = 0.0, 0.0
                         else:
-                            if '-' in raw_txt and raw_txt.index('-') > raw_txt.find(val_str):
-                                h1_val = val
-                                h2_val = -val
-                            elif '+' in raw_txt and raw_txt.index('+') > raw_txt.find(val_str):
-                                h1_val = -val
-                                h2_val = val
+                            # Проверяем положение по координате x (слева или справа от центра)
+                            if e['x'] < screen_center_x:
+                                h1_val, h2_val = val, -val
                             else:
-                                h1_val = val
-                                h2_val = -val
+                                h1_val, h2_val = -val, val
+
+                    # Пропускаем, если эта линия форы уже обработана
+                    if h1_val in seen_handicap_lines:
+                        continue
 
                     row_odds = []
                     for item in elements:
@@ -247,13 +255,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     left_vals = [v[1] for v in row_odds if v[0] < e['x']]
                     right_vals = [v[1] for v in row_odds if v[0] > e['x']]
                     if left_vals and right_vals:
-                        if not any(h['h1_val'] == h1_val for h in scanned_handicaps):
-                            scanned_handicaps.append({
-                                "h1_val": h1_val,
-                                "h2_val": h2_val,
-                                "h1": left_vals[-1],
-                                "h2": right_vals[0]
-                            })
+                        scanned_handicaps.append({
+                            "h1_val": h1_val,
+                            "h2_val": h2_val,
+                            "h1": left_vals[-1],
+                            "h2": right_vals[0]
+                        })
+                        seen_handicap_lines.add(h1_val)
 
     k_tu25, k_tb25 = None, None
     for t in scanned_totals:
