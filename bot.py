@@ -204,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ОБНОВЛЕННЫЙ АЛГОРИТМ С ИГНОРИРОВАНИЕМ МУСОРА)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (УЧИТЫВАЕМ ФОРЫ 0, ЦЕЛОЧИСЛЕННЫЕ И ЗАПЯТЫЕ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -217,7 +217,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         for e in elements:
             if handicap_anchor['y'] < e['y'] < handicap_end_y:
                 txt_low = e['text'].lower()
-                if any(w in txt_low for w in ['свернуть', 'развернуть', 'маркет', 'событий', 'live', 'главная', 'сейчас', 'история', 'игры', 'кибер', 'профиль']):
+                if any(w in txt_low for w in ['свернуть', 'развернуть', 'маркет', 'событий', 'live', 'главная', 'сейчас', 'история', 'игры', 'кибер', 'профиль', 'осн']):
                     continue
                 
                 found_row_y = None
@@ -232,49 +232,58 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
         for row_y, row_elems in rows_map.items():
             row_elems.sort(key=lambda item: item['x'])
-            row_full_text = " ".join([el['text'] for el in row_elems])
+            # Заменяем запятые на точки по всей строке для корректного считывания чисел с плавающей точкой
+            row_full_text = " ".join([el['text'] for el in row_elems]).replace(',', '.')
             
-            # ДЕБАГ-ЛОГ СТРОКИ ФОРЫ
             form_debug_lines.append(f"[DEBUG HC ROW] y={row_y} | текст: '{row_full_text}'")
 
             val = None
             h1_val, h2_val = 0.0, 0.0
 
-            if re.search(r'\b0\b', row_full_text) and not re.search(r'[1-9]', row_full_text.replace('0', '', 1)):
+            # 1. Проверка на нулевую фору (0 или 0.0)
+            if re.search(r'\b0(?:\.0)?\b', row_full_text) and not re.search(r'[1-9]', row_full_text.replace('0', '', 1)):
                 val = 0.0
                 h1_val, h2_val = 0.0, 0.0
             else:
+                # Ищем номинал форы со знаком (+ или -)
                 match_handicap = re.search(r'([+-]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*[+-])', row_full_text)
-                if match_handicap:
-                    raw_hc_str = match_handicap.group(1).replace(' ', '')
-                    extracted_nums = re.findall(r'\d+(?:\.\d+)?', raw_hc_str)
-                    if extracted_nums:
-                        try:
-                            val = float(extracted_nums[0])
-                        except ValueError:
-                            continue
+                
+                if not match_handicap or ('+' not in row_full_text and '-' not in row_full_text):
+                    continue
 
-                        if val > 5.0 or val == 0:
-                            continue
+                raw_hc_str = match_handicap.group(1).replace(' ', '')
+                extracted_nums = re.findall(r'\d+(?:\.\d+)?', raw_hc_str)
+                if not extracted_nums:
+                    continue
 
-                        is_h1_negative = False
-                        if '-' in raw_hc_str:
-                            if raw_hc_str.startswith('-') or raw_hc_str.endswith('+'):
-                                is_h1_negative = True
-                        else:
-                            for el in row_elems:
-                                if '-' in el['text'] and el['x'] < screen_center_x + 30:
-                                    is_h1_negative = True
-                                    break
+                try:
+                    val = float(extracted_nums[0])
+                except ValueError:
+                    continue
 
-                        if is_h1_negative:
-                            h1_val, h2_val = -val, val
-                        else:
-                            h1_val, h2_val = val, -val
+                if val > 5.0:
+                    continue
+
+                # Определяем знак для первой команды
+                is_h1_negative = False
+                if '-' in raw_hc_str:
+                    if raw_hc_str.startswith('-') or raw_hc_str.endswith('+'):
+                        is_h1_negative = True
+                else:
+                    for el in row_elems:
+                        if '-' in el['text'] and el['x'] < screen_center_x + 30:
+                            is_h1_negative = True
+                            break
+
+                if is_h1_negative:
+                    h1_val, h2_val = -val, val
+                else:
+                    h1_val, h2_val = val, -val
 
             if val is None or h1_val in seen_handicap_lines:
                 continue
 
+            # Собираем коэффициенты в строке
             row_odds = []
             for el in row_elems:
                 c_text = el['text'].replace(',', '.').replace(' ', '')
@@ -282,7 +291,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 for f_num in found:
                     try:
                         f_val = float(f_num)
-                        if f_val == val:
+                        # Исключаем совпадение коэффициента с номиналом форы (если фора не 0)
+                        if val != 0.0 and f_val == val:
                             continue
                         if 1.01 <= f_val <= 50.0:
                             row_odds.append((el['x'], f_val))
@@ -293,7 +303,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             left_vals = [v[1] for v in row_odds if v[0] < screen_center_x]
             right_vals = [v[1] for v in row_odds if v[0] > screen_center_x]
 
-            # ДЕБАГ-ЛОГ НАЙДЕННЫХ ЗНАЧЕНИЙ
             form_debug_lines.append(f"-> Распознано: Ф1={h1_val:+.1f} (кэфы слева: {left_vals}), Ф2={h2_val:+.1f} (кэфы справа: {right_vals})")
 
             if left_vals and right_vals:
