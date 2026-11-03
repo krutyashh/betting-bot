@@ -37,18 +37,27 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
     # Сортируем элементы сверху вниз по вертикали
     elements.sort(key=lambda e: e['y'])
-    
-    # 1. Поиск названия матча в шапке
-    match_title = "Команда 1 — Команда 2"
-    header_elements = [e for e in elements if 40 <= e['y'] <= 350]
-    header_elements_bottom_up = sorted(header_elements, key=lambda e: e['y'], reverse=True)
     screen_center_x = img.shape[1] / 2
 
-    for e in header_elements_bottom_up:
-        txt = e['text']
-        if re.search(r'\s+[-—–]\s+', txt):
-            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера)', txt.lower()):
-                parts = re.split(r'\s+[-—–]\s+', txt)
+    # 1. ТОЧНЫЙ ПОИСК НАЗВАНИЯ МАТЧА В ШАПКЕ
+    match_title = "Команда 1 — Команда 2"
+    team_candidates = []
+    for e in elements:
+        if 50 <= e['y'] <= 220:
+            txt = e['text'].strip()
+            if not any(w in txt.lower() for w in ['тур', 'сегодня', 'вчера', 'трансляция', 'футбол', 'лига', 'матч', 'основное']):
+                if not re.search(r'\d{2}:\d{2}', txt) and len(txt) > 2:
+                    team_candidates.append(e)
+
+    if len(team_candidates) >= 2:
+        team_candidates.sort(key=lambda item: (item['y'] // 15, item['x']))
+        t1_name = team_candidates[0]['text']
+        t2_name = team_candidates[1]['text']
+        match_title = f"{t1_name} — {t2_name}"
+    else:
+        for e in elements:
+            if 50 <= e['y'] <= 220 and re.search(r'\s+[-—–]\s+', e['text']):
+                parts = re.split(r'\s+[-—–]\s+', e['text'])
                 if len(parts) >= 2:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
@@ -65,21 +74,20 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         y_1x2 = 450
 
     # ==========================================
-    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (ТОЧНЫЙ ПОИСК)
+    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД
     # ==========================================
     form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2 найден на y={y_1x2}"]
     form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P', 'B', 'X', 'W', 'D', 'Л']
     t1_form_raw = []
     t2_form_raw = []
 
-    # Ищем форму строго в зоне между шапкой матча и блоком 1X2
     for e in elements:
-        if 100 <= e['y'] < y_1x2 - 30:
+        if 130 <= e['y'] < y_1x2 - 10:
             txt_raw = e['text'].strip()
             txt_lower = txt_raw.lower()
-            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол', 'ирбид', 'премьер']):
+            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол']):
                 continue
-            if re.search(r'\d{2}:\d{2}', txt_raw) or re.search(r'\d{1,2}\.\d{1,2}', txt_raw) or re.search(r'\d+', txt_raw):
+            if re.search(r'\d{2}:\d{2}', txt_raw) or re.search(r'\d{1,2}\.\d{1,2}', txt_raw):
                 continue
             
             form_debug_lines.append(f"y={e['y']}, x={e['x']}, txt: '{txt_raw}'")
@@ -196,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ИСПРАВЛЕННЫЙ СТРОКОВЫЙ СИНТЕЗ БЕЗ ФАНТОМОВ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ТОЧНЫЙ СИНТЕЗ С УЧЕТОМ НУЛЯ И ДРОБЕЙ ВРОДЕ 1.5 / 2.5)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -205,7 +213,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         next_anchors = [b['y'] for b in block_anchors if b['y'] > handicap_anchor['y']]
         handicap_end_y = min(next_anchors) if next_anchors else img.shape[0]
 
-        # Группируем элементы по горизонтальным строкам (высота строки в пределах 10 пикселей)
         rows_map = {}
         for e in elements:
             if handicap_anchor['y'] < e['y'] < handicap_end_y:
@@ -223,33 +230,40 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             row_elems.sort(key=lambda item: item['x'])
             row_full_text = " ".join([el['text'] for el in row_elems])
             
-            # Ищем точное значение форы со знаком (+ или -) и дробной/целой частью
-            match_h = re.search(r'([+-]\s*\d+(?:\.\d+)?)', row_full_text)
-            if not match_h:
-                # Если явного знака нет, ищем стандартный шаг форы
-                match_h = re.search(r'\b(0|0\.25|0\.5|0\.75|1|1\.25|1\.5|1\.75|2|2\.25|2\.5|2\.75|3|3\.5|4|4\.5)\b', row_full_text)
-                if not match_h:
-                    continue
-                val_raw = match_h.group(1)
-                val = float(val_raw)
-                avg_x = sum(el['x'] for el in row_elems) / len(row_elems)
-                if avg_x < screen_center_x:
-                    h1_val, h2_val = val, -val
-                else:
-                    h1_val, h2_val = -val, val
-            else:
-                sign_num_str = match_h.group(1).replace(" ", "")
-                val = float(re.sub(r'[^0-9\.]', '', sign_num_str))
-                if '-' in sign_num_str:
-                    h1_val, h2_val = -val, val
-                else:
-                    h1_val, h2_val = val, -val
+            val = None
+            h1_val, h2_val = 0.0, 0.0
 
-            # Жесткий отсев мусора, коэффициентов и дубликатов
-            if val > 5.0 or h1_val in seen_handicap_lines or (-h1_val) in seen_handicap_lines:
+            # Проверяем на нулевую фору
+            if re.search(r'\b0\b', row_full_text) and not re.search(r'[1-9]', row_full_text.replace('0', '', 1)):
+                val = 0.0
+                h1_val, h2_val = 0.0, 0.0
+            else:
+                match_num = re.search(r'([+-]?\d+(?:\.\d+)?)', row_full_text)
+                if match_num:
+                    num_str = match_num.group(1).replace(' ', '')
+                    try:
+                        val = float(re.sub(r'[^0-9\.]', '', num_str))
+                    except ValueError:
+                        continue
+
+                    if val > 5.0:
+                        continue
+
+                    if '-' in row_full_text:
+                        h1_val, h2_val = -val, val
+                    elif '+' in row_full_text:
+                        h1_val, h2_val = val, -val
+                    else:
+                        avg_x = sum(el['x'] for el in row_elems) / len(row_elems)
+                        if avg_x < screen_center_x:
+                            h1_val, h2_val = val, -val
+                        else:
+                            h1_val, h2_val = -val, val
+
+            if val is None or h1_val in seen_handicap_lines:
                 continue
 
-            # Собираем коэффициенты (от 1.01 до 50.0) в этой же строке
+            # Собираем коэффициенты в строке
             row_odds = []
             for el in row_elems:
                 c_text = el['text'].replace(',', '.').replace(' ', '')
