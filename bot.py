@@ -217,7 +217,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         for e in elements:
             if handicap_anchor['y'] < e['y'] < handicap_end_y:
                 txt_low = e['text'].lower()
-                if any(w in txt_low for w in ['свернуть', 'развернуть', 'маркет', 'событий', 'live', 'главная', 'сейчас', 'история', 'игры', 'кибер', 'профиль', 'осн']):
+                if any(w in txt_low for w in ['свернуть', 'развернуть', 'маркет', 'событий', 'live', 'главная', 'сейчас', 'история', 'игры', 'кибер', 'профиль', 'осн', 'и тотад']):
                     continue
                 
                 found_row_y = None
@@ -240,20 +240,18 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             center_val_elem = None
             raw_hc_token = ""
 
-            # Проверяем на явную фору 0 или буквы O/О по центру
-            is_explicit_zero = False
+            # Ищем явные маркеры нуля (0, 0.0, O, О) по центру
             for el in row_elems:
                 clean_txt = el['text'].strip().replace(',', '.').replace(' ', '')
                 clean_upper = clean_txt.upper()
                 if clean_upper in ['0', '0.0', 'O', 'О'] and abs(el['x'] - screen_center_x) < 60:
-                    is_explicit_zero = True
                     val = 0.0
                     center_val_elem = el
                     raw_hc_token = "0.0"
                     break
 
-            # Если явного нуля нет, ищем числовой номинал форы со знаком (+/-)
-            if not is_explicit_zero:
+            # Если явного нуля нет, ищем числовой номинал форы со знаком (+/-) или точку с числом (например, 1.5, 2.0)
+            if val is None:
                 for el in row_elems:
                     clean_txt = el['text'].strip().replace(',', '.').replace(' ', '')
                     match_hc = re.search(r'([+-]?\d+(?:\.\d+)?[+-]?)', clean_txt)
@@ -272,29 +270,35 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                             except ValueError:
                                 continue
 
-            # Спец-проверка: если в строке вообще нет цифр форы, но слева и справа есть ровно по коэффициенту -> это 100% Фора 0
+            # ЖЕЛЕЗОБЕТОННОЕ ПРАВИЛО ДЛЯ ФОРЫ 0:
+            # Если в строке вообще нет знаков '+' или '-' и нет других цифр номинала фор (<=5), 
+            # но при этом слева и справа есть ровно по коэффициенту — ЭТО 100% ФОРА 0 (0.0)!
             if val is None:
-                temp_left = []
-                temp_right = []
+                temp_left_odds = []
+                temp_right_odds = []
+                has_signs_or_digits = False
+
                 for el in row_elems:
-                    c_text = el['text'].replace(',', '.').replace(' ', '')
+                    t_str = el['text'].strip()
+                    if '+' in t_str or '-' in t_str:
+                        has_signs_or_digits = True
+                    
+                    c_text = t_str.replace(',', '.').replace(' ', '')
                     found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
                     for f_num in found:
                         try:
                             f_val = float(f_num)
                             if 1.01 <= f_val <= 50.0:
                                 if el['x'] < screen_center_x:
-                                    temp_left.append((el['x'], f_val))
+                                    temp_left_odds.append(f_val)
                                 else:
-                                    temp_right.append((el['x'], f_val))
+                                    temp_right_odds.append(f_val)
                         except ValueError:
                             continue
-                
-                has_other_digits = any(re.search(r'\d+', el['text']) and float(re.search(r'\d+', el['text']).group()) <= 5 for el in row_elems if 'П1' not in el['text'] and 'П2' not in el['text'])
-                
-                if temp_left and temp_right and not has_other_digits:
+
+                if temp_left_odds and temp_right_odds and not has_signs_or_digits:
                     val = 0.0
-                    center_val_elem = {'x': (temp_left[0][0] + temp_right[0][0]) / 2, 'text': '0'}
+                    center_val_elem = {'x': screen_center_x, 'text': '0'}
                     raw_hc_token = "0.0"
 
             if val is None:
@@ -316,7 +320,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 elif '+' in raw_hc_token:
                     is_h1_negative = False
                 else:
-                    left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < (center_val_elem['x'] if isinstance(center_val_elem, dict) else screen_center_x)]
+                    center_x = center_val_elem['x'] if isinstance(center_val_elem, dict) else center_val_elem.get('x', screen_center_x)
+                    left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < center_x]
                     if left_minuses:
                         is_h1_negative = True
 
@@ -330,7 +335,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
             left_odds = []
             right_odds = []
-            center_x_coord = center_val_elem['x'] if isinstance(center_val_elem, dict) else screen_center_x
+            center_x_coord = center_val_elem['x'] if isinstance(center_val_elem, dict) else center_val_elem.get('x', screen_center_x)
 
             for el in row_elems:
                 if center_val_elem and isinstance(center_val_elem, dict) and 'text' in center_val_elem and el == center_val_elem:
