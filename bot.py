@@ -47,7 +47,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     for e in header_elements_bottom_up:
         txt = e['text']
         if re.search(r'\s+[-—–]\s+', txt):
-            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера)', txt.lower()):
+            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера|трансляция)', txt.lower()):
                 parts = re.split(r'\s+[-—–]\s+', txt)
                 if len(parts) >= 2:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
@@ -73,10 +73,10 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     t2_form_raw = []
 
     for e in elements:
-        if 120 <= e['y'] <= 230:
+        if 130 <= e['y'] <= 230:
             txt_raw = e['text'].strip()
             txt_lower = txt_raw.lower()
-            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол']):
+            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол', 'барнаул', 'дзержинск', 'динамо', 'химик']):
                 continue
             if re.search(r'\d{2}:\d{2}', txt_raw) or re.search(r'\d{1,2}\.\d{1,2}', txt_raw):
                 continue
@@ -193,7 +193,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ТОЧНОЕ ОПРЕДЕЛЕНИЕ ЗНАКОВ И ЗНАЧЕНИЙ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (С УЧЕТОМ ЗНАКОВ СЛЕВА И СПРАВА)
     scanned_handicaps = []
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
     if handicap_anchor:
@@ -203,38 +203,31 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         for e in elements:
             if handicap_anchor['y'] < e['y'] < handicap_end_y:
                 raw_txt = e['text'].strip()
-                # Ищем точное значение форы (например, 1.5, 2.0, 0)
                 match_num = re.search(r'(\d+(\.\d+)?)', raw_txt)
                 if match_num:
                     val_str = match_num.group(1)
                     val = float(val_str)
                     
-                    # Отсекаем неверные срабатывания (коэффициенты или лишние цифры)
-                    if val > 10.0:
-                        continue
-
-                    # Проверяем расположение знаков относительно числа
-                    has_minus_before = raw_txt.find('-') != -1 and raw_txt.find('-') < raw_txt.find(val_str)
-                    has_plus_before = raw_txt.find('+') != -1 and raw_txt.find('+') < raw_txt.find(val_str)
-                    has_minus_after = raw_txt.find('-') != -1 and raw_txt.find('-') > raw_txt.find(val_str)
-                    has_plus_after = raw_txt.find('+') != -1 and raw_txt.find('+') > raw_txt.find(val_str)
-
-                    if has_plus_before or has_ минус_after: # если плюс слева, то у Т1 плюс, у Т2 минус
-                        if has_plus_before:
-                            h1_val, h2_val = val, -val
-                        else:
-                            h1_val, h2_val = -val, val
-                    elif has_minus_before or has_plus_after:
-                        if has_minus_before:
-                            h1_val, h2_val = -val, val
-                        else:
-                            h1_val, h2_val = val, -val
+                    if raw_txt.startswith('-') or (raw_txt.find('-') != -1 and raw_txt.find('-') < raw_txt.find(val_str) and not raw_txt.startswith('+')):
+                        h1_val = -val
+                        h2_val = val
+                    elif raw_txt.startswith('+') or raw_txt.find('+') < raw_txt.find(val_str):
+                        h1_val = val
+                        h2_val = -val
                     else:
                         if val == 0.0:
-                            h1_val, h2_val = 0.0, 0.0
+                            h1_val = 0.0
+                            h2_val = 0.0
                         else:
-                            # По умолчанию для Winline: если знак справа или отсутствует, определяем по стандарту линии
-                            h1_val, h2_val = val, -val
+                            if '-' in raw_txt and raw_txt.index('-') > raw_txt.find(val_str):
+                                h1_val = val
+                                h2_val = -val
+                            elif '+' in raw_txt and raw_txt.index('+') > raw_txt.find(val_str):
+                                h1_val = -val
+                                h2_val = val
+                            else:
+                                h1_val = val
+                                h2_val = -val
 
                     row_odds = []
                     for item in elements:
