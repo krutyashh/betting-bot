@@ -15,28 +15,11 @@ bot = telebot.TeleBot(TOKEN)
 
 GEMINI_KEY = os.getenv('GEMINI_KEY')
 
-# Инициализация Gemini API с динамическим поиском рабочей модели (защита от 404)
+# Инициализация Gemini API с актуальной моделью gemini-2.5-flash
 genai.configure(api_key=GEMINI_KEY)
+gemini_model = genai.GenerativeModel('gemini-2.5-flash')
 
-gemini_model = None
-target_models = ['gemini-1.5-flash', 'gemini-1.5-flash-002', 'gemini-1.5-flash-001', 'gemini-2.0-flash']
-
-try:
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    chosen_model_name = next((m for m in target_models if any(m in model_item for model_item in available_models)), None)
-    
-    if chosen_model_name:
-        gemini_model = genai.GenerativeModel(chosen_model_name)
-        print(f"✅ Успешно выбрана модель Gemini: {chosen_model_name}")
-    else:
-        fallback = next((m.name for m in genai.list_models() if 'flash' in m.name.lower()), 'gemini-1.5-flash')
-        gemini_model = genai.GenerativeModel(fallback)
-        print(f"⚠️ Использована резервная модель: {fallback}")
-except Exception as e:
-    print(f"⚠️ Ошибка автоопределения моделей: {e}. Пробуем дефолтную 'gemini-1.5-flash'.")
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-
-print("Gemini API успешно инициализирован.")
+print("Gemini API успешно инициализирован с моделью gemini-2.5-flash.")
 
 def parse_screenshot(image_bytes: bytes) -> dict:
     """
@@ -413,5 +396,5 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.1 (Gemini Vision + Dynamic Model Loader) успешно запущен...")
+    print("Бот v3.1 (Gemini Vision + Fixed Model gemini-2.5-flash) успешно запущен...")
     bot.infinity_polling()
