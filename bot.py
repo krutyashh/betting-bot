@@ -35,32 +35,40 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         clean_txt = text.strip()
         elements.append({'y': y_min, 'x': x_min, 'x_max': x_max, 'text': clean_txt})
 
-    # Сортируем элементы сверху вниз по вертикали
     elements.sort(key=lambda e: e['y'])
     screen_center_x = img.shape[1] / 2
 
-    # 1. ТОЧНЫЙ ПОИСК НАЗВАНИЯ МАТЧА В ШАПКЕ
+    # 1. ЖЕЛЕЗОБЕТОННЫЙ ПОИСК НАЗВАНИЯ МАТЧА В ШАПКЕ
     match_title = "Команда 1 — Команда 2"
     team_candidates = []
+    
+    # Ищем название под логотипами (y от 120 до 220)
     for e in elements:
-        if 50 <= e['y'] <= 220:
+        if 120 <= e['y'] <= 220:
             txt = e['text'].strip()
-            if not any(w in txt.lower() for w in ['тур', 'сегодня', 'вчера', 'трансляция', 'футбол', 'лига', 'матч', 'основное']):
-                if not re.search(r'\d{2}:\d{2}', txt) and len(txt) > 2:
-                    team_candidates.append(e)
+            txt_low = txt.lower()
+            # Отсекаем мусор, счетчик баланса, время и слова БК
+            if any(w in txt_low for w in ['тур', 'сегодня', 'вчера', 'трансляция', 'футбол', 'лига', 'матч', 'основное', 'винлайн', 'winline', '₽', '33', '35']):
+                continue
+            if re.search(r'\d{2}:\d{2}', txt) or re.search(r'^\d+$', txt) or len(txt) <= 1:
+                continue
+            team_candidates.append(e)
 
     if len(team_candidates) >= 2:
-        team_candidates.sort(key=lambda item: (item['y'] // 15, item['x']))
+        team_candidates.sort(key=lambda item: item['x'])
         t1_name = team_candidates[0]['text']
-        t2_name = team_candidates[1]['text']
+        t2_name = team_candidates[-1]['text']
         match_title = f"{t1_name} — {t2_name}"
     else:
+        # Запасной варіант: поиск единственной строки с дефисом в шапке
         for e in elements:
-            if 50 <= e['y'] <= 220 and re.search(r'\s+[-—–]\s+', e['text']):
-                parts = re.split(r'\s+[-—–]\s+', e['text'])
-                if len(parts) >= 2:
-                    match_title = f"{parts[0].strip()} — {parts[1].strip()}"
-                    break
+            if 50 <= e['y'] <= 250 and re.search(r'\s+[-—–]\s+', e['text']):
+                txt = e['text']
+                if not re.search(r'\d{2}:\d{2}', txt) and not any(w in txt.lower() for w in ['тур', 'сегодня', 'вчера', 'футбол']):
+                    parts = re.split(r'\s+[-—–]\s+', txt)
+                    if len(parts) >= 2:
+                        match_title = f"{parts[0].strip()} — {parts[1].strip()}"
+                        break
 
     # 2. ИЩЕМ ГЛАВНЫЙ ЯКОРЬ: «Исход 1X2»
     y_1x2 = None
@@ -123,7 +131,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     else:
         form_tokens = []
 
-    # Вспомогательная функция извлечения кэфов в диапазоне по y
     def extract_odds_in_zone(y_start, y_end):
         zone_items = []
         for e in elements:
@@ -140,7 +147,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         zone_items.sort(key=lambda item: item[0])
         return [item[1] for item in zone_items]
 
-    # Считываем «Исход 1X2» (находится на уровне y_1x2)
     odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 80)
     if len(odds_1x2) < 3:
         odds_1x2 = extract_odds_in_zone(y_1x2 - 40, y_1x2 + 120)
@@ -204,7 +210,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ТОЧНЫЙ СИНТЕЗ С УЧЕТОМ НУЛЯ И ДРОБЕЙ ВРОДЕ 1.5 / 2.5)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ПОЛНАЯ ПОДДЕРЖКА ЗАПИСЕЙ +2.5-, -1.5+, 0)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -233,32 +239,43 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             val = None
             h1_val, h2_val = 0.0, 0.0
 
-            # Проверяем на нулевую фору
+            # 1. Проверка на нулевую фору (0)
             if re.search(r'\b0\b', row_full_text) and not re.search(r'[1-9]', row_full_text.replace('0', '', 1)):
                 val = 0.0
                 h1_val, h2_val = 0.0, 0.0
             else:
-                match_num = re.search(r'([+-]?\d+(?:\.\d+)?)', row_full_text)
-                if match_num:
-                    num_str = match_num.group(1).replace(' ', '')
-                    try:
-                        val = float(re.sub(r'[^0-9\.]', '', num_str))
-                    except ValueError:
-                        continue
+                # 2. Поиск значений вида +2.5-, -1.5+, +1.5, -2.5
+                match_val = re.search(r'([+-]?\s*\d+(?:\.\d+)?\s*[+-]?)', row_full_text)
+                if match_val:
+                    raw_str = match_val.group(1).replace(' ', '')
+                    extracted_nums = re.findall(r'\d+(?:\.\d+)?', raw_str)
+                    if extracted_nums:
+                        try:
+                            val = float(extracted_nums[0])
+                        except ValueError:
+                            continue
 
-                    if val > 5.0:
-                        continue
+                        if val > 5.0:
+                            continue
 
-                    if '-' in row_full_text:
-                        h1_val, h2_val = -val, val
-                    elif '+' in row_full_text:
-                        h1_val, h2_val = val, -val
-                    else:
-                        avg_x = sum(el['x'] for el in row_elems) / len(row_elems)
-                        if avg_x < screen_center_x:
-                            h1_val, h2_val = val, -val
+                        # Определяем знаки по расположению символа '-' или '+'
+                        if '-' in raw_str:
+                            # Если минус стоит перед числом или после него (например, -2.5 или +2.5-)
+                            if raw_str.startswith('-') or raw_str.endswith('+'):
+                                h1_val, h2_val = -val, val
+                            else:
+                                h1_val, h2_val = val, -val
+                        elif '+' in raw_str:
+                            if raw_str.startswith('+'):
+                                h1_val, h2_val = val, -val
+                            else:
+                                h1_val, h2_val = -val, val
                         else:
-                            h1_val, h2_val = -val, val
+                            avg_x = sum(el['x'] for el in row_elems) / len(row_elems)
+                            if avg_x < screen_center_x:
+                                h1_val, h2_val = val, -val
+                            else:
+                                h1_val, h2_val = -val, val
 
             if val is None or h1_val in seen_handicap_lines:
                 continue
