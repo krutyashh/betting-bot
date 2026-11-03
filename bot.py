@@ -65,23 +65,25 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         y_1x2 = 450
 
     # ==========================================
-    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (СТРОГО ВЫШЕ 1X2)
+    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (СТРОГО ПОД ЛОГОТИПАМИ)
     # ==========================================
     form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2 найден на y={y_1x2}"]
-    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P']
+    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P', '8']
     t1_form_raw = []
     t2_form_raw = []
 
-    # Зона формы: под шапкой (от y=120) и строго до начала блока 1X2
-    form_zone_max_y = min(y_1x2 - 10, 320)
-
+    # Зона формы: строго под логотипами команд (по вертикали между y=180 и y=240)
     for e in elements:
-        if 120 <= e['y'] <= form_zone_max_y:
+        if 180 <= e['y'] <= 240:
             form_debug_lines.append(f"y={e['y']}, x={e['x']}, txt: '{e['text']}'")
             txt = e['text'].upper().strip()
             for char in txt:
                 if char in form_allowed_chars:
-                    clean_char = char.replace('V', 'В').replace('H', 'Н').replace('N', 'Н').replace('P', 'П')
+                    clean_char = (char.replace('V', 'В')
+                                      .replace('H', 'Н')
+                                      .replace('N', 'Н')
+                                      .replace('P', 'П')
+                                      .replace('8', 'Н'))
                     if clean_char in ['В', 'Н', 'П']:
                         if e['x'] < screen_center_x:
                             t1_form_raw.append({'x': e['x'], 'char': clean_char})
@@ -129,12 +131,11 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    # 3. ПОИСК ИКЕЙИ / ЯКОРЕЙ ВСЕХ БЛОКОВ НИЖЕ 1X2
+    # 3. ПОИСК ЯКОРЕЙ ВСЕХ БЛОКОВ НИЖЕ 1X2
     block_anchors = []
     for e in elements:
         if e['y'] > y_1x2:
             t_low = e['text'].lower().replace(" ", "")
-            # Строго проверяем названия блоков, чтобы не путать «Исход и тотал» с простым «Тотал»
             if 'исходтотал' in t_low or 'результатитотал' in t_low or ('исход' in t_low and 'тотал' in t_low):
                 block_anchors.append({'type': 'combo', 'y': e['y']})
             elif 'тотал' in t_low:
@@ -145,7 +146,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     # Сортируем якоря по вертикали сверху вниз
     block_anchors.sort(key=lambda b: b['y'])
 
-    # 4. СКАНИРУЕМ БЛОК «ТОТАЛ» (если найден якорь, читаем строго до следующего якоря)
+    # 4. СКАНИРУЕМ БЛОК «ТОТАЛ»
     scanned_totals = []
     total_anchor = next((b for b in block_anchors if b['type'] == 'total'), None)
     if total_anchor:
@@ -185,7 +186,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (если найден якорь, читаем строго до следующего якоря)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА»
     scanned_handicaps = []
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
     if handicap_anchor:
