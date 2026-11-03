@@ -3,99 +3,90 @@ import re
 import json
 import warnings
 import traceback
-import cv2
-import numpy as np
 import telebot
-from PIL import Image
-import io
-from google import genai
-from google.genai import types
 from scipy.stats import poisson
+import google.generativeai as genai
 
+# Подавляем технические предупреждения
 warnings.filterwarnings("ignore", category=UserWarning)
 
-TOKEN = "9223011917:AAF2aonZ5kaX9TkD7fx0kz6U2gFzc52Cx_Y"
+TOKEN = os.getenv('BOT_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
-print("Инициализация Gemini API...")
-GEMINI_KEY = "AQ.Ab8RN6Jn-Vik_Xw_u9RQIUOdihZQrSWZDR6YcWasuszCz2_43A"
-ai_client = genai.Client(api_key=GEMINI_KEY)
-print("Движок Gemini Vision успешно запущен вместо EasyOCR.")
+GEMINI_KEY = os.getenv('GEMINI_KEY')
+
+# Инициализация Gemini API
+genai.configure(api_key=GEMINI_KEY)
+gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+
+print("Gemini API успешно инициализирован.")
 
 def parse_screenshot(image_bytes: bytes) -> dict:
-    image = Image.open(io.BytesIO(image_bytes))
-
-    prompt = """
-    Ты — профессиональный парсер спортивных линий букмекерских контор. Твоя задача — идеально считать данные со скриншота для математической модели.
-    Внимательно проанализируй изображение и извлеки параметры. Верни ответ СТРОГО в формате JSON без каких-либо ```json ... ``` или пояснений. Только чистый JSON.
-
-    Структура JSON:
-    {
-      "match": "Название Команды 1 — Название Команды 2",
-      "k_p1": 2.10, "k_x": 3.40, "k_p2": 3.20, 
-      "scanned_totals": [
-         {"line": 2.5, "tu": 1.95, "tb": 1.85}
-      ],
-      "scanned_handicaps": [
-         {"h1_val": 0.0, "h2_val": 0.0, "h1": 1.55, "h2": 2.40}
-      ],
-      "t1_form": ["В", "Н", "П"], 
-      "t2_form": ["В", "В", "В"]
-    }
-    Правила извлечения:
-    1. Форма команд: найди кружочки последних матчей (W/D/L или В/Н/П). Раздели их для t1_form и t2_form. Символы строго: 'В', 'Н', 'П'. Если формы нет, верни [].
-    2. Форы: строго соблюдай знаки плюс/минус. Если фора (0), запиши как 0.0.
     """
+    Отправляет скриншот в Gemini 1.5 Flash. Если данные нечитаемы или отсутствуют,
+    выбрасывает исключение — никаких выдуманных дефолтных котировок.
+    """
+    prompt = """
+Ты — профессиональный спортивный аналитик и строгий парсер букмекерских линий.
+Проанализируй этот скриншот букмекерской конторы и верни **строго JSON** (без блоков кода типа ```json, только чистый JSON-текст).
+
+Внимательно изучи изображение и заполни следующие поля:
+1. "match": строка, точное название матча в формате "Команда 1 — Команда 2" (если названия не видны, укажи null).
+2. "k_p1": число (float), коэффициент на победу первой команды (П1). Если его нет на скриншоте, строго укажи null.
+3. "k_x": число (float), коэффициент на ничью (Х). Если его нет, строго укажи null.
+4. "k_p2": число (float), коэффициент на победу второй команды (П2). Если его нет, строго укажи null.
+5. "scanned_totals": список объектов тоталов, где каждый объект имеет вид:
+   {"line": 2.5, "tu": 1.75, "tb": 2.10} (если линии тоталов видны, перечисли их все; если нет — пустой список []).
+6. "scanned_handicaps": список объектов фор, где каждый объект имеет вид:
+   {"h1_val": -1.0, "h2_val": 1.0, "h1": 2.05, "h2": 1.78} (если форы видны, перечисли их; если нет — пустой список []).
+7. "t1_form": список строк (символы 'В', 'Н' или 'П'), последние результаты первой команды. Если не видны — [].
+8. "t2_form": список строк (символы 'В', 'Н' или 'П'), последние результаты второй команды. Если не видны — [].
+9. "form_log": строка с отладочным комментарием по распознаванию.
+
+КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Не выдумывай и не подставляй коэффициенты «из головы», если они неразборчивы или отсутствуют на скриншоте. Если базовые коэффициенты (k_p1, k_x, k_p2) не удается достоверно считать, поля должны содержать null.
+"""
+
+    image_part = {
+        "mime_type": "image/jpeg",
+        "data": image_bytes
+    }
 
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[image, prompt]
-        )
+        response = gemini_model.generate_content([prompt, image_part])
+        clean_text = response.text.strip()
         
-        raw_text = response.text.strip()
-        if raw_text.startswith("```"):
-            raw_text = re.sub(r'^```(?:json)?\n|```$', '', raw_text, flags=re.MULTILINE).strip()
+        if clean_text.startswith("```"):
+            clean_text = re.sub(r"^```(?:json)?\n", "", clean_text)
+            clean_text = re.sub(r"\n```$", "", clean_text)
+            clean_text = clean_text.strip()
 
-        data = json.loads(raw_text)
-
-        k_tu25 = None
-        k_tb25 = None
-        for t in data.get("scanned_totals", []):
-            if t.get("line") == 2.5:
-                k_tu25 = t.get("tu")
-                k_tb25 = t.get("tb")
-                break
+        data = json.loads(clean_text)
         
-        if not k_tu25 and data.get("scanned_totals"):
-            k_tu25 = data["scanned_totals"].get("tu")
-            k_tb25 = data["scanned_totals"].get("tb")
+        k1 = data.get("k_p1")
+        kx = data.get("k_x")
+        k2 = data.get("k_p2")
+        match_title = data.get("match")
 
-        form_tokens = data.get("t1_form", []) + data.get("t2_form", [])
+        if not match_title or k1 is None or kx is None or k2 is None:
+            raise ValueError(
+                "Не удалось достоверно считать обязательные данные с изображения "
+                "(название матча или основные коэффициенты 1X2 отсутствуют/нечитаемы)."
+            )
 
-        t1_f_str = ", ".join(data.get("t1_form", [])) if data.get("t1_form") else "нет данных"
-        t2_f_str = ", ".join(data.get("t2_form", [])) if data.get("t2_form") else "нет данных"
-        
-        form_log_str = (
-            f"<b>[GEMINI AI VISION LOG] Матч: {data.get('match', 'Команда 1 — Команда 2')}</b>\n"
-            f"Форма Команды 1: [{t1_f_str}] | Форма Команды 2: [{t2_f_str}]"
-        )
+        data.setdefault("scanned_totals", [])
+        data.setdefault("scanned_handicaps", [])
+        data.setdefault("t1_form", [])
+        data.setdefault("t2_form", [])
+        data.setdefault("form_log", "<b>[DEBUG FORM]</b> Распознано через Gemini Vision API")
 
-        return {
-            "match": data.get("match", "Команда 1 — Команда 2"),
-            "k_p1": float(data.get("k_p1", 1.0)),
-            "k_x": float(data.get("k_x", 1.0)),
-            "k_p2": float(data.get("k_p2", 1.0)),
-            "k_tu25": k_tu25,
-            "k_tb25": k_tb25,
-            "scanned_totals": data.get("scanned_totals", []),
-            "scanned_handicaps": data.get("scanned_handicaps", []),
-            "form_tokens": form_tokens,
-            "form_log": form_log_str
-        }
+        return data
 
-    except Exception as ex:
-        raise ValueError(f"Не удалось распарсить скриншот через Gemini ИИ. Ошибка: {str(ex)}")
+    except json.JSONDecodeError:
+        raise RuntimeError("Ошибка парсинга ответа Gemini: модель вернула некорректный JSON формат.")
+    except Exception as e:
+        raise RuntimeError(f"Ошибка считывания скриншота: {e}")
+
+
 def execute_v31_audit(data: dict) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
@@ -108,15 +99,40 @@ def execute_v31_audit(data: dict) -> str:
         p1_norm = implied_p1 / sum_1x2
         p2_norm = implied_p2 / sum_1x2
         
-        if data["k_tu25"] and data["k_tb25"]:
-            impl_tb = 1 / data["k_tb25"]
-            impl_tm = 1 / data["k_tu25"]
+        k_tu25, k_tb25 = None, None
+        for t in data.get("scanned_totals", []):
+            if t.get("line") == 2.5:
+                k_tu25, k_tb25 = t.get("tu"), t.get("tb")
+                break
+        if not k_tu25 and data.get("scanned_totals"):
+            k_tu25, k_tb25 = data["scanned_totals"][0].get("tu"), data["scanned_totals"][0].get("tb")
+
+        if k_tu25 and k_tb25:
+            impl_tb = 1 / k_tb25
+            impl_tm = 1 / k_tu25
             xG_total = max(1.0, min(5.0, 2.5 * (impl_tb / (impl_tb + impl_tm) + 0.5)))
         else:
             xG_total = 2.50
             
         xG_1 = max(0.2, xG_total * (p1_norm / (p1_norm + p2_norm + 0.001)))
         xG_2 = max(0.2, xG_total - xG_1)
+
+        # ==========================================
+        # УРОВЕНЬ 1: Форма как коэффициент-множитель к xG
+        # ==========================================
+        t1_form = data.get("t1_form", [])
+        t2_form = data.get("t2_form", [])
+
+        t1_score = t1_form.count('В') - t1_form.count('П') if t1_form else 0
+        t2_score = t2_form.count('В') - t2_form.count('П') if t2_form else 0
+
+        # Корректирующие множители силы (ограничены коридором [0.90, 1.10])
+        t1_mult = max(0.90, min(1.10, 1.0 + (t1_score * 0.02)))
+        t2_mult = max(0.90, min(1.10, 1.0 + (t2_score * 0.02)))
+
+        xG_1 = max(0.2, xG_1 * t1_mult)
+        xG_2 = max(0.2, xG_2 * t2_mult)
+
     except ZeroDivisionError:
         xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
 
@@ -184,7 +200,7 @@ def execute_v31_audit(data: dict) -> str:
         
         if h1_val == 0.0:
             prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if i > j) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
-        elif h1_val.is_integer():
+        elif float(h1_val).is_integer():
             h_int = int(h1_val)
             prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h_int)
             prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) == -h_int)
@@ -200,7 +216,7 @@ def execute_v31_audit(data: dict) -> str:
 
         if h2_val == 0.0:
             prob_h2 = sum(grid[i, j] for i in range(10) for j in range(10) if j > i) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
-        elif h2_val.is_integer():
+        elif float(h2_val).is_integer():
             h_int = int(h2_val)
             prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > -h_int)
             prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) == -h_int)
@@ -230,13 +246,16 @@ def execute_v31_audit(data: dict) -> str:
                 "odds": round(100.0 / p_combo * 1.085, 2),
                 "real_prob": p_combo
             })
+
     best_pick = None
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    if data["k_tu25"] and data["k_tu25"] < 1.75:
+    k_tu_check = k_tu25 if k_tu25 else 2.0
+    k_tb_check = k_tb25 if k_tb25 else 2.0
+    if k_tu_check < 1.75:
         vector_lock = "Низовой"
-    elif data["k_tb25"] and data["k_tb25"] < 1.75:
+    elif k_tb_check < 1.75:
         vector_lock = "Верховой"
     else:
         vector_lock = "Стандартный"
@@ -244,6 +263,10 @@ def execute_v31_audit(data: dict) -> str:
     if not cascade_passed:
         final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нарушен каскадный лимит матрицы Пуассона]"
     else:
+        # УРОВЕНЬ 2: Вето на команды в глубоком кризисе (катастрофический луз-стрик: >= 4 поражений из 5)
+        is_t1_crisis = t1_form.count('П') >= 4
+        is_t2_crisis = t2_form.count('П') >= 4
+
         for m in markets_to_test:
             odds = m["odds"]
             
@@ -253,6 +276,12 @@ def execute_v31_audit(data: dict) -> str:
             if vector_lock == "Низовой" and "Тотал больше" in m["name"]:
                 continue
             if vector_lock == "Верховой" and "Тотал меньше" in m["name"]:
+                continue
+
+            # Применение вето: исключаем рынки на пользу команд в кризисе
+            if is_t1_crisis and any(w in m["name"] for w in ["Победа 1 (П1)", "1X", "Фора 1"]):
+                continue
+            if is_t2_crisis and any(w in m["name"] for w in ["Победа 2 (П2)", "X2", "Фора 2"]):
                 continue
 
             real_prob = m["real_prob"]
@@ -275,17 +304,19 @@ def execute_v31_audit(data: dict) -> str:
                         final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ (ПЛАН Б)"
 
         if not best_pick:
-            final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вектора]"
+            final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вето/вектора]"
 
     form_bonus = 0
-    if data["form_tokens"]:
-        wins_count = data["form_tokens"].count('В')
-        losses_count = data["form_tokens"].count('П')
-        form_bonus = (wins_count - losses_count) * 2
+    if t1_form or t2_form:
+        t1_bonus_score = t1_form.count('В') - t1_form.count('П')
+        t2_bonus_score = t2_form.count('В') - t2_form.count('П')
+        form_bonus = (t1_bonus_score - t2_bonus_score) * 2
 
-    totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data["scanned_totals"]]) if data["scanned_totals"] else "Не найдены"
-    hc_str = ", ".join([f"Ф1({h['h1_val']:+.1f}):{h['h1']} / Ф2({h['h2_val']:+.1f}):{h['h2']}" for h in data["scanned_handicaps"]]) if data["scanned_handicaps"] else "Не найдены"
-    form_str = ", ".join(data["form_tokens"]) if data["form_tokens"] else "Не считывались"
+    totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data.get("scanned_totals", [])]) if data.get("scanned_totals") else "Не найдены"
+    hc_str = ", ".join([f"Ф1({h['h1_val']:+.1f}):{h['h1']} / Ф2({h['h2_val']:+.1f}):{h['h2']}" for h in data.get("scanned_handicaps", [])]) if data.get("scanned_handicaps") else "Не найдены"
+    
+    t1_form_str = ", ".join(t1_form) if t1_form else "Не считывалась"
+    t2_form_str = ", ".join(t2_form) if t2_form else "Не считывалась"
 
     if best_pick:
         market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
@@ -298,13 +329,13 @@ def execute_v31_audit(data: dict) -> str:
 
     report = f"""{data.get("form_log", "")}
 
-<b>Шаг 0: Калибровка и привязка котировок</b>
+<b>Шаг 0: Калибровка и привязка котировок (Gemini Vision)</b>
 - <b>Матч</b>: {t1} — {t2}
 - <b>1X2</b>: П1={k1}, Х={kx}, П2={k2}
 - <b>Тоталы (все линии)</b>: [{totals_str}]
 - <b>Форы (все линии)</b>: [{hc_str}]
-- <b>Форма команд</b>: [{form_str}] (Бонус: {form_bonus:+d}%)
-- xG: {t1} ({xG_1:.2f}) / {t2} ({xG_2:.2f}) | Сумма: {xG_total:.2f}
+- <b>Форма команд</b>: {t1} [{t1_form_str}] / {t2} [{t2_form_str}] (Бонус: {form_bonus:+d}%)
+- xG (с учетом множителя формы): {t1} ({xG_1:.2f}) / {t2} ({xG_2:.2f}) | Сумма: {xG_total:.2f}
 - Вектор матча: {vector_lock}
 
 <b>Шаг 1: Матрица Пуассона и каскадный контроль</b>
@@ -338,12 +369,12 @@ def execute_v31_audit(data: dict) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.1 запущен. Отправьте скриншот линии.")
+    bot.reply_to(message, "Аудитор v3.1 (Gemini Vision + Форм-фильтры) запущен. Отправьте скриншот линии.")
 
 
 @bot.message_handler(content_types=['photo'])
 def func_handle_photo(message):
-    processing_msg = bot.reply_to(message, "🛡️ Аудит видимых рынков по модели v3.1...")
+    processing_msg = bot.reply_to(message, "🛡️ Анализируем скриншот через Gemini 1.5 Flash...")
     try:
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
@@ -361,5 +392,5 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.1 успешно запущен и готов к работе...")
+    print("Бот v3.1 (Gemini Vision + Advanced Form Rules) успешно запущен...")
     bot.infinity_polling()
