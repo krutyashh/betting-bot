@@ -204,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (УЧИТЫВАЕМ ФОРЫ 0, ЦЕЛОЧИСЛЕННЫЕ И ЗАПЯТЫЕ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ТОЧНЫЙ ПОИСК ЦЕНТРАЛЬНОГО ЗНАЧЕНИЯ ФОРЫ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -232,85 +232,97 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
         for row_y, row_elems in rows_map.items():
             row_elems.sort(key=lambda item: item['x'])
-            # Заменяем запятые на точки по всей строке для корректного считывания чисел с плавающей точкой
             row_full_text = " ".join([el['text'] for el in row_elems]).replace(',', '.')
             
             form_debug_lines.append(f"[DEBUG HC ROW] y={row_y} | текст: '{row_full_text}'")
 
+            center_val_elem = None
             val = None
-            h1_val, h2_val = 0.0, 0.0
 
-            # 1. Проверка на нулевую фору (0 или 0.0)
-            if re.search(r'\b0(?:\.0)?\b', row_full_text) and not re.search(r'[1-9]', row_full_text.replace('0', '', 1)):
-                val = 0.0
-                h1_val, h2_val = 0.0, 0.0
-            else:
-                # Ищем номинал форы со знаком (+ или -)
-                match_handicap = re.search(r'([+-]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*[+-])', row_full_text)
+            for el in row_elems:
+                clean_el_text = el['text'].replace(',', '.').replace(' ', '')
+                if clean_el_text in ['0', '0.0']:
+                    val = 0.0
+                    center_val_elem = el
+                    break
                 
-                if not match_handicap or ('+' not in row_full_text and '-' not in row_full_text):
-                    continue
+                match_val = re.search(r'([+-]?\d+(?:\.\d+)?)', clean_el_text)
+                if match_val:
+                    try:
+                        potential_val = float(match_val.group(1))
+                        if 0.0 <= potential_val <= 5.0:
+                            if ('+' in clean_el_text or '-' in clean_el_text or potential_val == 0.0 or abs(el['x'] - screen_center_x) < 80):
+                                val = potential_val
+                                center_val_elem = el
+                                break
+                    except ValueError:
+                        continue
 
-                raw_hc_str = match_handicap.group(1).replace(' ', '')
-                extracted_nums = re.findall(r'\d+(?:\.\d+)?', raw_hc_str)
-                if not extracted_nums:
-                    continue
-
-                try:
-                    val = float(extracted_nums[0])
-                except ValueError:
-                    continue
-
-                if val > 5.0:
-                    continue
-
-                # Определяем знак для первой команды
-                is_h1_negative = False
-                if '-' in raw_hc_str:
-                    if raw_hc_str.startswith('-') or raw_hc_str.endswith('+'):
-                        is_h1_negative = True
+            if val is None or center_val_elem is None:
+                match_hc = re.search(r'([+-]\d+(?:\.\d+)?)', row_full_text)
+                if match_hc:
+                    try:
+                        val = float(match_hc.group(1))
+                    except ValueError:
+                        continue
+                elif ' 0 ' in row_full_text or row_full_text.strip() == '0':
+                    val = 0.0
                 else:
-                    for el in row_elems:
-                        if '-' in el['text'] and el['x'] < screen_center_x + 30:
-                            is_h1_negative = True
-                            break
+                    continue
 
-                if is_h1_negative:
-                    h1_val, h2_val = -val, val
-                else:
-                    h1_val, h2_val = val, -val
-
-            if val is None or h1_val in seen_handicap_lines:
+            if val > 5.0:
                 continue
 
-            # Собираем коэффициенты в строке
-            row_odds = []
+            is_h1_negative = False
+            if '-' in row_full_text:
+                minus_elems = [el for el in row_elems if '-' in el['text'] and el['x'] < screen_center_x]
+                if minus_elems or row_full_text.strip().startswith('-'):
+                    is_h1_negative = True
+
             for el in row_elems:
+                if '+' in el['text'] and el['x'] < screen_center_x:
+                    is_h1_negative = False
+
+            if val == 0.0:
+                h1_val, h2_val = 0.0, 0.0
+            elif is_h1_negative:
+                h1_val, h2_val = -val, val
+            else:
+                h1_val, h2_val = val, -val
+                for el in row_elems:
+                    if '-' in el['text'] and el['x'] > screen_center_x:
+                        h1_val, h2_val = -val, val
+
+            if h1_val in seen_handicap_lines:
+                continue
+
+            left_odds = []
+            right_odds = []
+
+            for el in row_elems:
+                if el == center_val_elem:
+                    continue
                 c_text = el['text'].replace(',', '.').replace(' ', '')
                 found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
                 for f_num in found:
                     try:
                         f_val = float(f_num)
-                        # Исключаем совпадение коэффициента с номиналом форы (если фора не 0)
-                        if val != 0.0 and f_val == val:
-                            continue
                         if 1.01 <= f_val <= 50.0:
-                            row_odds.append((el['x'], f_val))
+                            if el['x'] < screen_center_x:
+                                left_odds.append(f_val)
+                            else:
+                                right_odds.append(f_val)
                     except ValueError:
                         continue
 
-            row_odds.sort(key=lambda x: x[0])
-            left_vals = [v[1] for v in row_odds if v[0] < screen_center_x]
-            right_vals = [v[1] for v in row_odds if v[0] > screen_center_x]
+            form_debug_lines.append(f"-> Распознано: Ф1={h1_val:+.1f} (кэфы слева: {left_odds}), Ф2={h2_val:+.1f} (кэфы справа: {right_odds})")
 
-            form_debug_lines.append(f"-> Распознано: Ф1={h1_val:+.1f} (кэфы слева: {left_vals}), Ф2={h2_val:+.1f} (кэфы справа: {right_vals})")
-
-            if left_vals and right_vals:
+            if left_odds and right_odds:
                 scanned_handicaps.append({
                     "h1_val": h1_val,
                     "h2_val": h2_val,
-                    "h1": left_vals[0],
-                    "h2": right_vals[-1]
+                    "h1": left_odds[0],
+                    "h2": right_odds[-1]
                 })
                 seen_handicap_lines.add(h1_val)
 
