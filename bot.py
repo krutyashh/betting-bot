@@ -35,13 +35,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         clean_txt = text.strip()
         elements.append({'y': y_min, 'x': x_min, 'x_max': x_max, 'text': clean_txt})
 
-    # Сортируем элементы сверху вниз
+    # Сортируем элементы сверху вниз по вертикали
     elements.sort(key=lambda e: e['y'])
     
+    # 1. Поиск названия матча в шапке
     match_title = "Команда 1 — Команда 2"
     header_elements = [e for e in elements if 40 <= e['y'] <= 350]
     header_elements_bottom_up = sorted(header_elements, key=lambda e: e['y'], reverse=True)
-    
     screen_center_x = img.shape[1] / 2
 
     for e in header_elements_bottom_up:
@@ -53,39 +53,27 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
-    # 1. Якорь блока 1X2
+    # 2. ИЩЕМ ГЛАВНЫЙ ЯКОРЬ: «Исход 1X2»
     y_1x2 = None
     for el in elements:
         t_low = el['text'].lower().replace(" ", "").replace(".", "")
-        if 'исход1x2' in t_low or 'исход1х2' in t_low or '1x2' in t_low or '1х2' in t_low:
+        if 'исход1x2' in t_low or 'исход1х2' in t_low or t_low in ['1x2', '1х2']:
             y_1x2 = el['y']
             break
 
     if y_1x2 is None:
-        y_1x2 = 350
-
-    # 2. Ищем якорь блока «Исход и Тотал» (или комбинированных рынков), если он есть на скриншоте
-    y_combo_market = None
-    for el in elements:
-        t_low = el['text'].lower().replace(" ", "")
-        if 'исходтотал' in t_low or 'результатитотал' in t_low or ('исход' in t_low and 'тотал' in t_low):
-            y_combo_market = el['y']
-            break
+        y_1x2 = 450
 
     # ==========================================
-    # СТРОГОЕ ЗОНИРОВАНИЕ ДЛЯ ФОРМЫ КОМАНД
+    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (СТРОГО ВЫШЕ 1X2)
     # ==========================================
-    form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2: y={y_1x2}"]
-    if y_combo_market:
-        form_debug_lines.append(f"Якорь 'Исход и Тотал': y={y_combo_market}")
-
+    form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2 найден на y={y_1x2}"]
     form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P']
     t1_form_raw = []
     t2_form_raw = []
 
-    # Форма строго выше блока 1X2 и блока комби-рынков
-    upper_boundary_limit = y_combo_market if (y_combo_market and y_combo_market < y_1x2) else y_1x2
-    form_zone_max_y = min(upper_boundary_limit - 10, 320)
+    # Зона формы: под шапкой (от y=120) и строго до начала блока 1X2
+    form_zone_max_y = min(y_1x2 - 10, 320)
 
     for e in elements:
         if 120 <= e['y'] <= form_zone_max_y:
@@ -114,6 +102,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     else:
         form_tokens = []
 
+    # Вспомогательная функция извлечения кэфов в диапазоне по y
     def extract_odds_in_zone(y_start, y_end):
         zone_items = []
         for e in elements:
@@ -130,86 +119,54 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         zone_items.sort(key=lambda item: item[0])
         return [item[1] for item in zone_items]
 
-    # Извлекаем 1X2 (обязательно)
-    odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 100)
+    # Считываем «Исход 1X2» (находится на уровне y_1x2)
+    odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 80)
     if len(odds_1x2) < 3:
-        odds_1x2 = extract_odds_in_zone(y_1x2 - 50, y_1x2 + 150)
+        odds_1x2 = extract_odds_in_zone(y_1x2 - 40, y_1x2 + 120)
     
     if len(odds_1x2) < 3:
         raise ValueError(f"Ошибка парсинга 1X2: найдено коэффициентов: {len(odds_1x2)}. Требуется ровно 3.")
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    # Сканер тоталов
+    # 3. ПОИСК ИКЕЙИ / ЯКОРЕЙ ВСЕХ БЛОКОВ НИЖЕ 1X2
+    block_anchors = []
+    for e in elements:
+        if e['y'] > y_1x2:
+            t_low = e['text'].lower().replace(" ", "")
+            # Строго проверяем названия блоков, чтобы не путать «Исход и тотал» с простым «Тотал»
+            if 'исходтотал' in t_low or 'результатитотал' in t_low or ('исход' in t_low and 'тотал' in t_low):
+                block_anchors.append({'type': 'combo', 'y': e['y']})
+            elif 'тотал' in t_low:
+                block_anchors.append({'type': 'total', 'y': e['y']})
+            elif 'фора' in t_low:
+                block_anchors.append({'type': 'handicap', 'y': e['y']})
+
+    # Сортируем якоря по вертикали сверху вниз
+    block_anchors.sort(key=lambda b: b['y'])
+
+    # 4. СКАНИРУЕМ БЛОК «ТОТАЛ» (если найден якорь, читаем строго до следующего якоря)
     scanned_totals = []
-    max_totals_y = y_1x2
-    for e in elements:
-        if e['y'] > y_1x2 + 30:
-            clean_t = e['text'].replace(',', '.').replace(' ', '')
-            if re.match(r'^[0-5]\.5$', clean_t):
-                try:
-                    line_val = float(clean_t)
-                    row_odds = []
-                    for item in elements:
-                        if abs(item['y'] - e['y']) <= 12:
-                            c_text = item['text'].replace(',', '.').replace(' ', '')
-                            found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                            for f_num in found:
-                                try:
-                                    val = float(f_num)
-                                    if val == line_val and abs(item['x'] - e['x']) < 15:
-                                        continue
-                                    if 1.01 <= val <= 50.0:
-                                        row_odds.append((item['x'], val))
-                                except ValueError:
-                                    continue
-                    row_odds.sort(key=lambda x: x[0])
-                    left_vals = [v[1] for v in row_odds if v[0] < e['x']]
-                    right_vals = [v[1] for v in row_odds if v[0] > e['x']]
-                    if left_vals and right_vals:
-                        if not any(t['line'] == line_val for t in scanned_totals):
-                            scanned_totals.append({
-                                "line": line_val,
-                                "tu": left_vals[-1],
-                                "tb": right_vals[0]
-                            })
-                            if e['y'] > max_totals_y:
-                                max_totals_y = e['y']
-                except ValueError:
-                    continue
+    total_anchor = next((b for b in block_anchors if b['type'] == 'total'), None)
+    if total_anchor:
+        next_anchors = [b['y'] for b in block_anchors if b['y'] > total_anchor['y']]
+        total_end_y = min(next_anchors) if next_anchors else img.shape[0]
 
-    # Если на скриншоте ниже тоталов есть блок «Исход и Тотал», фиксируем его нижнюю границу
-    combo_block_bottom_y = max_totals_y
-    if y_combo_market and y_combo_market > y_1x2:
         for e in elements:
-            if y_combo_market <= e['y'] <= y_combo_market + 250:
-                if e['y'] > combo_block_bottom_y:
-                    combo_block_bottom_y = e['y']
-
-    # СТАРТ ПОИСКА ФОР: строго ниже тоталов и блока «Исход и Тотал»
-    y_handicap_start = max(y_1x2 + 100, combo_block_bottom_y + 15)
-
-    # Сканер фор
-    scanned_handicaps = []
-    for e in elements:
-        if e['y'] >= y_handicap_start:
-            raw_txt = e['text'].upper().replace('O', '0').replace('О', '0').replace(',', '.').replace(' ', '').rstrip('+')
-            if re.match(r'^([-+]?\d+(\.\d+)?|0(\.0)?)$', raw_txt) or raw_txt in ['0', '0.0', '0.00']:
-                try:
-                    match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
-                    if match_num:
-                        h_str = match_num.group(1)
-                        h_val = float(h_str)
-                        
+            if total_anchor['y'] < e['y'] < total_end_y:
+                clean_t = e['text'].replace(',', '.').replace(' ', '')
+                if re.match(r'^[0-5]\.5$', clean_t):
+                    try:
+                        line_val = float(clean_t)
                         row_odds = []
                         for item in elements:
-                            if abs(item['y'] - e['y']) <= 10:
+                            if abs(item['y'] - e['y']) <= 12 and total_anchor['y'] < item['y'] < total_end_y:
                                 c_text = item['text'].replace(',', '.').replace(' ', '')
                                 found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
                                 for f_num in found:
                                     try:
                                         val = float(f_num)
-                                        if val == abs(h_val) and abs(item['x'] - e['x']) < 15:
+                                        if val == line_val and abs(item['x'] - e['x']) < 15:
                                             continue
                                         if 1.01 <= val <= 50.0:
                                             row_odds.append((item['x'], val))
@@ -219,14 +176,58 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                         left_vals = [v[1] for v in row_odds if v[0] < e['x']]
                         right_vals = [v[1] for v in row_odds if v[0] > e['x']]
                         if left_vals and right_vals:
-                            if not any(h['line'] == h_val for h in scanned_handicaps):
-                                scanned_handicaps.append({
-                                    "line": h_val,
-                                    "h1": left_vals[-1],
-                                    "h2": right_vals[0]
+                            if not any(t['line'] == line_val for t in scanned_totals):
+                                scanned_totals.append({
+                                    "line": line_val,
+                                    "tu": left_vals[-1],
+                                    "tb": right_vals[0]
                                 })
-                except (ValueError, IndexError):
-                    continue
+                    except ValueError:
+                        continue
+
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (если найден якорь, читаем строго до следующего якоря)
+    scanned_handicaps = []
+    handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
+    if handicap_anchor:
+        next_anchors = [b['y'] for b in block_anchors if b['y'] > handicap_anchor['y']]
+        handicap_end_y = min(next_anchors) if next_anchors else img.shape[0]
+
+        for e in elements:
+            if handicap_anchor['y'] < e['y'] < handicap_end_y:
+                raw_txt = e['text'].upper().replace('O', '0').replace('О', '0').replace(',', '.').replace(' ', '').rstrip('+')
+                if re.match(r'^([-+]?\d+(\.\d+)?|0(\.0)?)$', raw_txt) or raw_txt in ['0', '0.0', '0.00']:
+                    try:
+                        match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
+                        if match_num:
+                            h_str = match_num.group(1)
+                            h_val = float(h_str)
+                            
+                            row_odds = []
+                            for item in elements:
+                                if abs(item['y'] - e['y']) <= 10 and handicap_anchor['y'] < item['y'] < handicap_end_y:
+                                    c_text = item['text'].replace(',', '.').replace(' ', '')
+                                    found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                                    for f_num in found:
+                                        try:
+                                            val = float(f_num)
+                                            if val == abs(h_val) and abs(item['x'] - e['x']) < 15:
+                                                continue
+                                            if 1.01 <= val <= 50.0:
+                                                row_odds.append((item['x'], val))
+                                        except ValueError:
+                                            continue
+                            row_odds.sort(key=lambda x: x[0])
+                            left_vals = [v[1] for v in row_odds if v[0] < e['x']]
+                            right_vals = [v[1] for v in row_odds if v[0] > e['x']]
+                            if left_vals and right_vals:
+                                if not any(h['line'] == h_val for h in scanned_handicaps):
+                                    scanned_handicaps.append({
+                                        "line": h_val,
+                                        "h1": left_vals[-1],
+                                        "h2": right_vals[0]
+                                    })
+                    except (ValueError, IndexError):
+                        continue
 
     k_tu25, k_tb25 = None, None
     for t in scanned_totals:
