@@ -38,7 +38,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     # Сортируем элементы сверху вниз
     elements.sort(key=lambda e: e['y'])
     
-    # ПРАВИЛО 2: В шапке матча идем снизу вверх по строкам, ищем строку с командами по разделителю "пробел дефис пробел"
     match_title = "Команда 1 — Команда 2"
     header_elements = [e for e in elements if 40 <= e['y'] <= 350]
     header_elements_bottom_up = sorted(header_elements, key=lambda e: e['y'], reverse=True)
@@ -47,7 +46,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
     for e in header_elements_bottom_up:
         txt = e['text']
-        # Ищем строку с пробел + дефис + пробел
         if re.search(r'\s+[-—–]\s+', txt):
             if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера)', txt.lower()):
                 parts = re.split(r'\s+[-—–]\s+', txt)
@@ -55,19 +53,43 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
                     break
 
+    # 1. Якорь блока 1X2
+    y_1x2 = None
+    for el in elements:
+        t_low = el['text'].lower().replace(" ", "").replace(".", "")
+        if 'исход1x2' in t_low or 'исход1х2' in t_low or '1x2' in t_low or '1х2' in t_low:
+            y_1x2 = el['y']
+            break
+
+    if y_1x2 is None:
+        y_1x2 = 350
+
+    # 2. Ищем якорь блока «Исход и Тотал» (или комбинированных рынков), если он есть на скриншоте
+    y_combo_market = None
+    for el in elements:
+        t_low = el['text'].lower().replace(" ", "")
+        if 'исходтотал' in t_low or 'результатитотал' in t_low or ('исход' in t_low and 'тотал' in t_low):
+            y_combo_market = el['y']
+            break
+
     # ==========================================
-    # ДЕБАГ-ЛОГИРОВАНИЕ ЗОНЫ ФОРМЫ КОМАНД
+    # СТРОГОЕ ЗОНИРОВАНИЕ ДЛЯ ФОРМЫ КОМАНД
     # ==========================================
-    print(f"\n--- [DEBUG OCR] Анализ формы для матча: {match_title} ---")
-    
+    form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2: y={y_1x2}"]
+    if y_combo_market:
+        form_debug_lines.append(f"Якорь 'Исход и Тотал': y={y_combo_market}")
+
     form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P']
     t1_form_raw = []
     t2_form_raw = []
 
+    # Форма строго выше блока 1X2 и блока комби-рынков
+    upper_boundary_limit = y_combo_market if (y_combo_market and y_combo_market < y_1x2) else y_1x2
+    form_zone_max_y = min(upper_boundary_limit - 10, 320)
+
     for e in elements:
-        # Узкая зона поиска по вертикали под логотипами команд
-        if 180 <= e['y'] <= 300:
-            print(f"  [ЗОНА ФОРМЫ] y={e['y']}, x={e['x']}, текст: '{e['text']}'")
+        if 120 <= e['y'] <= form_zone_max_y:
+            form_debug_lines.append(f"y={e['y']}, x={e['x']}, txt: '{e['text']}'")
             txt = e['text'].upper().strip()
             for char in txt:
                 if char in form_allowed_chars:
@@ -75,10 +97,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     if clean_char in ['В', 'Н', 'П']:
                         if e['x'] < screen_center_x:
                             t1_form_raw.append({'x': e['x'], 'char': clean_char})
-                            print(f"    -> Зачтено в форму Т1: '{clean_char}' (x={e['x']})")
                         else:
                             t2_form_raw.append({'x': e['x'], 'char': clean_char})
-                            print(f"    -> Зачтено в форму Т2: '{clean_char}' (x={e['x']})")
 
     t1_form_raw.sort(key=lambda item: item['x'])
     t2_form_raw.sort(key=lambda item: item['x'])
@@ -86,23 +106,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     t1_form = [item['char'] for item in t1_form_raw][-5:]
     t2_form = [item['char'] for item in t2_form_raw][-5:]
 
-    print(f"  [РЕЗУЛЬТАТ ФОРМЫ] Т1: {t1_form} | Т2: {t2_form}\n---------------------------------------------------")
+    form_debug_lines.append(f"<b>ИТОГ Т1:</b> {t1_form} | <b>ИТОГ Т2:</b> {t2_form}")
+    form_log_str = "\n".join(form_debug_lines)
 
     if len(t1_form) >= 3 and len(t2_form) >= 3:
         form_tokens = t1_form + t2_form
     else:
         form_tokens = []
-
-    # Ищем стартовый якорь блока 1X2
-    y_1x2 = None
-    for el in elements:
-        t_low = el['text'].lower().replace(" ", "").replace(".", "")
-        if 'исход1x2' in t_low or 'исход1х2' in t_low:
-            y_1x2 = el['y']
-            break
-
-    if y_1x2 is None:
-        y_1x2 = 350
 
     def extract_odds_in_zone(y_start, y_end):
         zone_items = []
@@ -130,10 +140,11 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     
     k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
 
-    # Универсальный сканер тоталов по паттерну
+    # Сканер тоталов
     scanned_totals = []
+    max_totals_y = y_1x2
     for e in elements:
-        if e['y'] > y_1x2:
+        if e['y'] > y_1x2 + 30:
             clean_t = e['text'].replace(',', '.').replace(' ', '')
             if re.match(r'^[0-5]\.5$', clean_t):
                 try:
@@ -162,18 +173,27 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                                 "tu": left_vals[-1],
                                 "tb": right_vals[0]
                             })
+                            if e['y'] > max_totals_y:
+                                max_totals_y = e['y']
                 except ValueError:
                     continue
 
-    # СТАРТ ПОИСКА ФОР: сразу ниже блока 1X2, независимо от тоталов
-    y_handicap_start = y_1x2 + 40
+    # Если на скриншоте ниже тоталов есть блок «Исход и Тотал», фиксируем его нижнюю границу
+    combo_block_bottom_y = max_totals_y
+    if y_combo_market and y_combo_market > y_1x2:
+        for e in elements:
+            if y_combo_market <= e['y'] <= y_combo_market + 250:
+                if e['y'] > combo_block_bottom_y:
+                    combo_block_bottom_y = e['y']
 
-    # Сканер фор (Улучшен для надежного распознавания нулевой форы и защиты от OCR-артефактов)
+    # СТАРТ ПОИСКА ФОР: строго ниже тоталов и блока «Исход и Тотал»
+    y_handicap_start = max(y_1x2 + 100, combo_block_bottom_y + 15)
+
+    # Сканер фор
     scanned_handicaps = []
     for e in elements:
-        if e['y'] > y_handicap_start:
+        if e['y'] >= y_handicap_start:
             raw_txt = e['text'].upper().replace('O', '0').replace('О', '0').replace(',', '.').replace(' ', '').rstrip('+')
-            # Расширенное условие для точного захвата плюс/минус знаков, нуля и десятичных дробей
             if re.match(r'^([-+]?\d+(\.\d+)?|0(\.0)?)$', raw_txt) or raw_txt in ['0', '0.0', '0.00']:
                 try:
                     match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
@@ -183,7 +203,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                         
                         row_odds = []
                         for item in elements:
-                            if abs(item['y'] - e['y']) <= 12:
+                            if abs(item['y'] - e['y']) <= 10:
                                 c_text = item['text'].replace(',', '.').replace(' ', '')
                                 found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
                                 for f_num in found:
@@ -222,7 +242,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         "k_tu25": k_tu25, "k_tb25": k_tb25,
         "scanned_totals": scanned_totals,
         "scanned_handicaps": scanned_handicaps,
-        "form_tokens": form_tokens
+        "form_tokens": form_tokens,
+        "form_log": form_log_str
     }
 
 
@@ -250,7 +271,6 @@ def execute_v31_audit(data: dict) -> str:
     except ZeroDivisionError:
         xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
 
-    # РАСШИРЕНИЕ МАТРИЦЫ ПУАССОНА ДО 10x10
     grid = np.zeros((10, 10))
     score_probs = []
     for i in range(10):
@@ -274,22 +294,16 @@ def execute_v31_audit(data: dict) -> str:
     t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
     t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
 
-    # ==========================================
-    # ПОЛНЫЙ НАБОР 45+ РЫНКОВ И КОМБИ-ИСХОДОВ С ДИНАМИЧЕСКОЙ МАРЖОЙ
-    # ==========================================
     markets_to_test = [
-        # Основные исходы 1X2 (базовая маржа ~4.5%)
         {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i > j)},
         {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i == j)},
         {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i < j)},
         
-        # Двойные шансы (маржа ~5%)
         {"name": "1X", "odds": round(100.0 / max(0.1, sum(grid[i, j] for i in range(10) for j in range(10) if i >= j)) * 1.05, 2), "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i >= j)},
         {"name": "12", "odds": round(100.0 / max(0.1, sum(grid[i, j] for i in range(10) for j in range(10) if i != j)) * 1.05, 2), "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i != j)},
         {"name": "X2", "odds": round(100.0 / max(0.1, sum(grid[i, j] for i in range(10) for j in range(10) if i <= j)) * 1.05, 2), "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i <= j)},
     ]
 
-    # Реальные тоталы со скриншота
     scanned_lines = {t["line"] for t in data.get("scanned_totals", [])}
     for t_item in data.get("scanned_totals", []):
         line = t_item["line"]
@@ -306,7 +320,6 @@ def execute_v31_audit(data: dict) -> str:
             "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) > line)
         })
 
-    # Дополнительные виртуальные тоталы (0.5–4.5) с маржой ~5.5%
     for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
         if line not in scanned_lines:
             p_tu = sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) < line)
@@ -316,7 +329,6 @@ def execute_v31_audit(data: dict) -> str:
             if p_tb > 0:
                 markets_to_test.append({"name": f"Тотал больше ({line})", "odds": round(100.0 / p_tb * 1.055, 2), "real_prob": p_tb})
 
-    # Форы
     for h_item in data.get("scanned_handicaps", []):
         h_val = h_item["line"]
         if h_val == 0.0:
@@ -361,7 +373,6 @@ def execute_v31_audit(data: dict) -> str:
                 "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > h_val)
             })
 
-    # Комбинированные рынки с повышенной динамической маржой (~8-9% для комбо)
     combo_markets = [
         ("П1 и ТБ(2.5)", lambda i, j: i > j and (i + j) > 2.5),
         ("П1 и ТМ(2.5)", lambda i, j: i > j and (i + j) < 2.5),
@@ -375,7 +386,7 @@ def execute_v31_audit(data: dict) -> str:
         if p_combo > 0:
             markets_to_test.append({
                 "name": combo_name,
-                "odds": round(100.0 / p_combo * 1.085, 2), # Динамическая маржа для сложных рынков
+                "odds": round(100.0 / p_combo * 1.085, 2),
                 "real_prob": p_combo
             })
 
@@ -383,7 +394,6 @@ def execute_v31_audit(data: dict) -> str:
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    # ЖЕСТКИЙ ВЕКТОР МАТЧА
     if data["k_tu25"] and data["k_tu25"] < 1.75:
         vector_lock = "Низовой"
     elif data["k_tb25"] and data["k_tb25"] < 1.75:
@@ -391,14 +401,12 @@ def execute_v31_audit(data: dict) -> str:
     else:
         vector_lock = "Стандартный"
 
-    # Если каскад не прошел, фиксируем статус СКИП, но продолжаем расчет для вывода отчета
     if not cascade_passed:
         final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нарушен каскадный лимит матрицы Пуассона]"
     else:
         for m in markets_to_test:
             odds = m["odds"]
             
-            # Отсекаем коэффициенты выше 5.50 и ниже безопасного порога Плана Б (1.85)
             if odds > 5.50 or odds < 1.85:
                 continue
 
@@ -408,21 +416,16 @@ def execute_v31_audit(data: dict) -> str:
                 continue
 
             real_prob = m["real_prob"]
-            
-            # ДИНАМИЧЕСКИЙ ШТРАФ ПОГРЕШНОСТИ вместо статических 3.0%
             dynamic_penalty = max(1.5, min(4.5, (100 - real_prob) * 0.04))
             real_prob_min = real_prob - dynamic_penalty
-            
             implied_prob = (1 / odds) * 100
             
-            # ОСНОВНОЙ КОРИДОР (ПЛАН А): Кэфы от 2.10 и выше
             if odds >= 2.10:
                 vm_min = real_prob_min - implied_prob
                 if vm_min >= 1.50 and vm_min > max_margin_val:
                     max_margin_val = vm_min
                     best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
                     final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
-            # СТРАХОВОЧНЫЙ КОРИДОР (ПЛАН Б): Кэфы в диапазоне 1.85 - 2.09
             else:
                 if real_prob_min > (implied_prob + 6.0):
                     excess = real_prob_min - (implied_prob + 6.0)
@@ -453,7 +456,9 @@ def execute_v31_audit(data: dict) -> str:
         confidence = 0
         stake_pct = 0
 
-    report = f"""<b>Шаг 0: Калибровка и привязка котировок</b>
+    report = f"""{data.get("form_log", "")}
+
+<b>Шаг 0: Калибровка и привязка котировок</b>
 - <b>Матч</b>: {t1} — {t2}
 - <b>1X2</b>: П1={k1}, Х={kx}, П2={k2}
 - <b>Тоталы (все линии)</b>: [{totals_str}]
