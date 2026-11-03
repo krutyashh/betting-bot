@@ -1,397 +1,101 @@
 import os
 import re
+import json
 import warnings
 import traceback
 import cv2
 import numpy as np
 import telebot
-import easyocr
+from PIL import Image
+import io
+from google import genai
+from google.genai import types
 from scipy.stats import poisson
 
-# Подавляем технические предупреждения PyTorch и Депрекационные варнинги для чистоты логов
 warnings.filterwarnings("ignore", category=UserWarning)
 
 TOKEN = "9223011917:AAF2aonZ5kaX9TkD7fx0kz6U2gFzc52Cx_Y"
 bot = telebot.TeleBot(TOKEN)
 
-print("Инициализация EasyOCR движка...")
-reader = easyocr.Reader(['ru', 'en'], gpu=False)
-print("Движок OCR успешно запущен.")
+print("Инициализация Gemini API...")
+GEMINI_KEY = "AQ.Ab8RN6Jn-Vik_Xw_u9RQIUOdihZQrSWZDR6YcWasuszCz2_43A"
+ai_client = genai.Client(api_key=GEMINI_KEY)
+print("Движок Gemini Vision успешно запущен вместо EasyOCR.")
 
 def parse_screenshot(image_bytes: bytes) -> dict:
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    results = reader.readtext(img, detail=1)
-    
-    elements = []
-    if not results:
-        pass
-    
-    for bbox, text, prob in results:
-        y_min = int(bbox[0][1])
-        x_min = int(bbox[0][0])
-        x_max = int(bbox[2][0])
-        clean_txt = text.strip()
-        elements.append({'y': y_min, 'x': x_min, 'x_max': x_max, 'text': clean_txt})
+    image = Image.open(io.BytesIO(image_bytes))
 
-    elements.sort(key=lambda e: e['y'])
-    screen_center_x = img.shape[1] / 2
+    prompt = """
+    Ты — профессиональный парсер спортивных линий букмекерских контор. Твоя задача — идеально считать данные со скриншота для математической модели.
+    Внимательно проанализируй изображение и извлеки параметры. Верни ответ СТРОГО в формате JSON без каких-либо ```json ... ``` или пояснений. Только чистый JSON.
 
-    # 1. ЖЕЛЕЗОБЕТОННЫЙ ПОИСК НАЗВАНИЯ МАТЧА В ШАПКЕ
-    match_title = "Команда 1 — Команда 2"
-    team_candidates = []
-    
-    # Ищем название под логотипами (y от 120 до 220)
-    for e in elements:
-        if 120 <= e['y'] <= 220:
-            txt = e['text'].strip()
-            txt_low = txt.lower()
-            # Отсекаем мусор, счетчик баланса, время и слова БК
-            if any(w in txt_low for w in ['тур', 'сегодня', 'вчера', 'трансляция', 'футбол', 'лига', 'матч', 'основное', 'винлайн', 'winline', '₽', '33', '35']):
-                continue
-            if re.search(r'\d{2}:\d{2}', txt) or len(txt) <= 1:
-                continue
-            team_candidates.append(e)
-
-    if len(team_candidates) >= 2:
-        team_candidates.sort(key=lambda item: item['x'])
-        t1_name = team_candidates[0]['text']
-        t2_name = team_candidates[-1]['text']
-        match_title = f"{t1_name} — {t2_name}"
-    else:
-        # Запасной вариант: поиск единственной строки с дефисом в шапке
-        for e in elements:
-            if 50 <= e['y'] <= 250 and re.search(r'\s+[-—–]\s+', e['text']):
-                txt = e['text']
-                if not re.search(r'\d{2}:\d{2}', txt) and not any(w in txt.lower() for w in ['тур', 'сегодня', 'вчера', 'футбол']):
-                    parts = re.split(r'\s+[-—–]\s+', txt)
-                    if len(parts) >= 2:
-                        match_title = f"{parts[0].strip()} — {parts[1].strip()}"
-                        break
-
-    # 2. ИЩЕМ ГЛАВНЫЙ ЯКОРЬ: «Исход 1X2»
-    y_1x2 = None
-    for el in elements:
-        t_low = el['text'].lower().replace(" ", "").replace(".", "")
-        if 'исход1x2' in t_low or 'исход1х2' in t_low or t_low in ['1x2', '1х2']:
-            y_1x2 = el['y']
-            break
-
-    if y_1x2 is None:
-        y_1x2 = 450
-
-    # ==========================================
-    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД
-    # ==========================================
-    form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2 найден на y={y_1x2}"]
-    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P', 'B', 'X', 'W', 'D', 'Л']
-    t1_form_raw = []
-    t2_form_raw = []
-
-    for e in elements:
-        if 130 <= e['y'] < y_1x2 - 10:
-            txt_raw = e['text'].strip()
-            txt_lower = txt_raw.lower()
-            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол']):
-                continue
-            if re.search(r'\d{2}:\d{2}', txt_raw) or re.search(r'\d{1,2}\.\d{1,2}', txt_raw):
-                continue
-            
-            form_debug_lines.append(f"y={e['y']}, x={e['x']}, txt: '{txt_raw}'")
-            cleaned_box_text = txt_raw.upper().replace(' ', '')
-            for char in cleaned_box_text:
-                if char in form_allowed_chars:
-                    clean_char = (char.replace('V', 'В')
-                                      .replace('H', 'Н')
-                                      .replace('N', 'Н')
-                                      .replace('P', 'П')
-                                      .replace('B', 'В')
-                                      .replace('W', 'В')
-                                      .replace('D', 'Н')
-                                      .replace('X', 'Н')
-                                      .replace('Л', 'П'))
-                    if clean_char in ['В', 'Н', 'П']:
-                        if e['x'] < screen_center_x:
-                            t1_form_raw.append({'x': e['x'], 'char': clean_char})
-                        else:
-                            t2_form_raw.append({'x': e['x'], 'char': clean_char})
-
-    t1_form_raw.sort(key=lambda item: item['x'])
-    t2_form_raw.sort(key=lambda item: item['x'])
-
-    t1_form = [item['char'] for item in t1_form_raw][-5:]
-    t2_form = [item['char'] for item in t2_form_raw][-5:]
-
-    form_debug_lines.append(f"<b>ИТОГ Т1:</b> {t1_form} | <b>ИТОГ Т2:</b> {t2_form}")
-
-    def extract_odds_in_zone(y_start, y_end):
-        zone_items = []
-        for e in elements:
-            if y_start <= e['y'] < y_end:
-                clean_t = e['text'].replace(',', '.').replace('․', '.').replace('·', '.').replace(' ', '')
-                found_nums = re.findall(r'\d{1,3}\.\d{1,2}', clean_t)
-                for num_str in found_nums:
-                    try:
-                        val = float(num_str)
-                        if 1.01 <= val <= 50.0:
-                            zone_items.append((e['x'], val))
-                    except ValueError:
-                        continue
-        zone_items.sort(key=lambda item: item[0])
-        return [item[1] for item in zone_items]
-
-    odds_1x2 = extract_odds_in_zone(y_1x2, y_1x2 + 80)
-    if len(odds_1x2) < 3:
-        odds_1x2 = extract_odds_in_zone(y_1x2 - 40, y_1x2 + 120)
-    
-    if len(odds_1x2) < 3:
-        raise ValueError(f"Ошибка парсинга 1X2: найдено коэффициентов: {len(odds_1x2)}. Требуется ровно 3.")
-    
-    k_p1, k_x, k_p2 = odds_1x2[0], odds_1x2[1], odds_1x2[2]
-
-    # 3. ПОИСК ЯКОРЕЙ ВСЕХ БЛОКОВ НИЖЕ 1X2
-    block_anchors = []
-    for e in elements:
-        if e['y'] > y_1x2:
-            t_low = e['text'].lower().replace(" ", "")
-            if 'исходтотал' in t_low or 'результатитотал' in t_low or ('исход' in t_low and 'тотал' in t_low):
-                block_anchors.append({'type': 'combo', 'y': e['y']})
-            elif 'тотал' in t_low:
-                block_anchors.append({'type': 'total', 'y': e['y']})
-            elif 'фора' in t_low:
-                block_anchors.append({'type': 'handicap', 'y': e['y']})
-
-    block_anchors.sort(key=lambda b: b['y'])
-
-    # 4. СКАНИРУЕМ БЛОК «ТОТАЛ»
-    scanned_totals = []
-    total_anchor = next((b for b in block_anchors if b['type'] == 'total'), None)
-    if total_anchor:
-        next_anchors = [b['y'] for b in block_anchors if b['y'] > total_anchor['y']]
-        total_end_y = min(next_anchors) if next_anchors else img.shape[0]
-
-        for e in elements:
-            if total_anchor['y'] < e['y'] < total_end_y:
-                clean_t = e['text'].replace(',', '.').replace(' ', '')
-                if re.match(r'^[0-5]\.5$', clean_t):
-                    try:
-                        line_val = float(clean_t)
-                        row_odds = []
-                        for item in elements:
-                            if abs(item['y'] - e['y']) <= 12 and total_anchor['y'] < item['y'] < total_end_y:
-                                c_text = item['text'].replace(',', '.').replace(' ', '')
-                                found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                                for f_num in found:
-                                    try:
-                                        val = float(f_num)
-                                        if val == line_val and abs(item['x'] - e['x']) < 15:
-                                            continue
-                                        if 1.01 <= val <= 50.0:
-                                            row_odds.append((item['x'], val))
-                                    except ValueError:
-                                        continue
-                        row_odds.sort(key=lambda x: x[0])
-                        left_vals = [v[1] for v in row_odds if v[0] < e['x']]
-                        right_vals = [v[1] for v in row_odds if v[0] > e['x']]
-                        if left_vals and right_vals:
-                            if not any(t['line'] == line_val for t in scanned_totals):
-                                scanned_totals.append({
-                                    "line": line_val,
-                                    "tu": left_vals[-1],
-                                    "tb": right_vals[0]
-                                })
-                    except ValueError:
-                        continue
-
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ЖЕЛЕЗОБЕТОННЫЙ ЗАХВАТ ФОРЫ 0 И ТОЧНЫЙ ПАРСИНГ НОМИНАЛОВ)
-    scanned_handicaps = []
-    seen_handicap_lines = set()
-    handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
-
-    if handicap_anchor:
-        next_anchors = [b['y'] for b in block_anchors if b['y'] > handicap_anchor['y']]
-        handicap_end_y = min(next_anchors) if next_anchors else img.shape[0]
-
-        rows_map = {}
-        for e in elements:
-            if handicap_anchor['y'] < e['y'] < handicap_end_y:
-                txt_low = e['text'].lower()
-                if any(w in txt_low for w in ['свернуть', 'развернуть', 'маркет', 'событий', 'live', 'главная', 'сейчас', 'история', 'игры', 'кибер', 'профиль', 'осн', 'и тотад']):
-                    continue
-                
-                found_row_y = None
-                for ry in rows_map.keys():
-                    if abs(ry - e['y']) <= 10:
-                        found_row_y = ry
-                        break
-                if found_row_y is None:
-                    found_row_y = e['y']
-                    rows_map[found_row_y] = []
-                rows_map[found_row_y].append(e)
-
-        for row_y, row_elems in rows_map.items():
-            row_elems.sort(key=lambda item: item['x'])
-            row_full_text = " ".join([el['text'] for el in row_elems]).replace(',', '.')
-            
-            form_debug_lines.append(f"[DEBUG HC ROW] y={row_y} | текст: '{row_full_text}'")
-
-            val = None
-            center_val_elem = None
-            raw_hc_token = ""
-
-            # Ищем явные маркеры нуля (0, 0.0, O, О) по центру
-            for el in row_elems:
-                clean_txt = el['text'].strip().replace(',', '.').replace(' ', '')
-                clean_upper = clean_txt.upper()
-                if clean_upper in ['0', '0.0', 'O', 'О'] and abs(el['x'] - screen_center_x) < 60:
-                    val = 0.0
-                    center_val_elem = el
-                    raw_hc_token = "0.0"
-                    break
-
-            # Если явного нуля нет, ищем числовой номинал форы со знаком (+/-) или точку с числом (например, 1.5, 2.0)
-            if val is None:
-                for el in row_elems:
-                    clean_txt = el['text'].strip().replace(',', '.').replace(' ', '')
-                    match_hc = re.search(r'([+-]?\d+(?:\.\d+)?[+-]?)', clean_txt)
-                    if match_hc:
-                        extracted_str = match_hc.group(1)
-                        num_match = re.search(r'\d+(?:\.\d+)?', extracted_str)
-                        if num_match:
-                            try:
-                                potential_val = float(num_match.group(0))
-                                if 0.0 <= potential_val <= 5.0:
-                                    if '+' in extracted_str or '-' in extracted_str or abs(el['x'] - screen_center_x) < 70:
-                                        val = potential_val
-                                        center_val_elem = el
-                                        raw_hc_token = extracted_str
-                                        break
-                            except ValueError:
-                                continue
-
-            # ЖЕЛЕЗОБЕТОННОЕ ПРАВИЛО ДЛЯ ФОРЫ 0:
-            # Если в строке вообще нет знаков '+' или '-' и нет других цифр номинала фор (<=5), 
-            # но при этом слева и справа есть ровно по коэффициенту — ЭТО 100% ФОРА 0 (0.0)!
-            if val is None:
-                temp_left_odds = []
-                temp_right_odds = []
-                has_signs_or_digits = False
-
-                for el in row_elems:
-                    t_str = el['text'].strip()
-                    if '+' in t_str or '-' in t_str:
-                        has_signs_or_digits = True
-                    
-                    c_text = t_str.replace(',', '.').replace(' ', '')
-                    found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                    for f_num in found:
-                        try:
-                            f_val = float(f_num)
-                            if 1.01 <= f_val <= 50.0:
-                                if el['x'] < screen_center_x:
-                                    temp_left_odds.append(f_val)
-                                else:
-                                    temp_right_odds.append(f_val)
-                        except ValueError:
-                            continue
-
-                if temp_left_odds and temp_right_odds and not has_signs_or_digits:
-                    val = 0.0
-                    center_val_elem = {'x': screen_center_x, 'text': '0'}
-                    raw_hc_token = "0.0"
-
-            if val is None:
-                continue
-
-            if val > 5.0:
-                continue
-
-            is_h1_negative = False
-            
-            if val == 0.0:
-                h1_val, h2_val = 0.0, 0.0
-            else:
-                if '-' in raw_hc_token:
-                    if raw_hc_token.startswith('-') or raw_hc_token.endswith('+'):
-                        is_h1_negative = True
-                elif '+' in raw_hc_token and raw_hc_token.endswith('-'):
-                    is_h1_negative = False
-                elif '+' in raw_hc_token:
-                    is_h1_negative = False
-                else:
-                    center_x = center_val_elem['x'] if isinstance(center_val_elem, dict) else center_val_elem.get('x', screen_center_x)
-                    left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < center_x]
-                    if left_minuses:
-                        is_h1_negative = True
-
-                if is_h1_negative:
-                    h1_val, h2_val = -val, val
-                else:
-                    h1_val, h2_val = val, -val
-
-            if h1_val in seen_handicap_lines:
-                continue
-
-            left_odds = []
-            right_odds = []
-            center_x_coord = center_val_elem['x'] if isinstance(center_val_elem, dict) else center_val_elem.get('x', screen_center_x)
-
-            for el in row_elems:
-                if center_val_elem and isinstance(center_val_elem, dict) and 'text' in center_val_elem and el == center_val_elem:
-                    continue
-                c_text = el['text'].replace(',', '.').replace(' ', '')
-                found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                for f_num in found:
-                    try:
-                        f_val = float(f_num)
-                        if val != 0.0 and f_val == val:
-                            continue
-                        if 1.01 <= f_val <= 50.0:
-                            if el['x'] < center_x_coord:
-                                left_odds.append(f_val)
-                            else:
-                                right_odds.append(f_val)
-                    except ValueError:
-                        continue
-
-            form_debug_lines.append(f"-> Распознано: Ф1={h1_val:+.1f} (кэфы слева: {left_odds}), Ф2={h2_val:+.1f} (кэфы справа: {right_odds})")
-
-            if left_odds and right_odds:
-                scanned_handicaps.append({
-                    "h1_val": h1_val,
-                    "h2_val": h2_val,
-                    "h1": left_odds[0],
-                    "h2": right_odds[-1]
-                })
-                seen_handicap_lines.add(h1_val)
-
-    form_log_str = "\n".join(form_debug_lines)
-
-    if len(t1_form) >= 3 and len(t2_form) >= 3:
-        form_tokens = t1_form + t2_form
-    else:
-        form_tokens = []
-
-    k_tu25, k_tb25 = None, None
-    for t in scanned_totals:
-        if t["line"] == 2.5:
-            k_tu25, k_tb25 = t["tu"], t["tb"]
-            break
-    if not k_tu25 and scanned_totals:
-        k_tu25, k_tb25 = scanned_totals[0]["tu"], scanned_totals[0]["tb"]
-
-    return {
-        "match": match_title,
-        "k_p1": k_p1, "k_x": k_x, "k_p2": k_p2,
-        "k_tu25": k_tu25, "k_tb25": k_tb25,
-        "scanned_totals": scanned_totals,
-        "scanned_handicaps": scanned_handicaps,
-        "form_tokens": form_tokens,
-        "form_log": form_log_str
+    Структура JSON:
+    {
+      "match": "Название Команды 1 — Название Команды 2",
+      "k_p1": 2.10, "k_x": 3.40, "k_p2": 3.20, 
+      "scanned_totals": [
+         {"line": 2.5, "tu": 1.95, "tb": 1.85}
+      ],
+      "scanned_handicaps": [
+         {"h1_val": 0.0, "h2_val": 0.0, "h1": 1.55, "h2": 2.40}
+      ],
+      "t1_form": ["В", "Н", "П"], 
+      "t2_form": ["В", "В", "В"]
     }
+    Правила извлечения:
+    1. Форма команд: найди кружочки последних матчей (W/D/L или В/Н/П). Раздели их для t1_form и t2_form. Символы строго: 'В', 'Н', 'П'. Если формы нет, верни [].
+    2. Форы: строго соблюдай знаки плюс/минус. Если фора (0), запиши как 0.0.
+    """
 
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=[image, prompt]
+        )
+        
+        raw_text = response.text.strip()
+        if raw_text.startswith("```"):
+            raw_text = re.sub(r'^```(?:json)?\n|```$', '', raw_text, flags=re.MULTILINE).strip()
 
+        data = json.loads(raw_text)
+
+        k_tu25 = None
+        k_tb25 = None
+        for t in data.get("scanned_totals", []):
+            if t.get("line") == 2.5:
+                k_tu25 = t.get("tu")
+                k_tb25 = t.get("tb")
+                break
+        
+        if not k_tu25 and data.get("scanned_totals"):
+            k_tu25 = data["scanned_totals"].get("tu")
+            k_tb25 = data["scanned_totals"].get("tb")
+
+        form_tokens = data.get("t1_form", []) + data.get("t2_form", [])
+
+        t1_f_str = ", ".join(data.get("t1_form", [])) if data.get("t1_form") else "нет данных"
+        t2_f_str = ", ".join(data.get("t2_form", [])) if data.get("t2_form") else "нет данных"
+        
+        form_log_str = (
+            f"<b>[GEMINI AI VISION LOG] Матч: {data.get('match', 'Команда 1 — Команда 2')}</b>\n"
+            f"Форма Команды 1: [{t1_f_str}] | Форма Команды 2: [{t2_f_str}]"
+        )
+
+        return {
+            "match": data.get("match", "Команда 1 — Команда 2"),
+            "k_p1": float(data.get("k_p1", 1.0)),
+            "k_x": float(data.get("k_x", 1.0)),
+            "k_p2": float(data.get("k_p2", 1.0)),
+            "k_tu25": k_tu25,
+            "k_tb25": k_tb25,
+            "scanned_totals": data.get("scanned_totals", []),
+            "scanned_handicaps": data.get("scanned_handicaps", []),
+            "form_tokens": form_tokens,
+            "form_log": form_log_str
+        }
+
+    except Exception as ex:
+        raise ValueError(f"Не удалось распарсить скриншот через Gemini ИИ. Ошибка: {str(ex)}")
 def execute_v31_audit(data: dict) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
@@ -478,7 +182,6 @@ def execute_v31_audit(data: dict) -> str:
         h1_val = h_item["h1_val"]
         h2_val = h_item["h2_val"]
         
-        # Фора 1
         if h1_val == 0.0:
             prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if i > j) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
         elif h1_val.is_integer():
@@ -495,7 +198,6 @@ def execute_v31_audit(data: dict) -> str:
             "real_prob": prob_h1
         })
 
-        # Фора 2
         if h2_val == 0.0:
             prob_h2 = sum(grid[i, j] for i in range(10) for j in range(10) if j > i) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
         elif h2_val.is_integer():
@@ -528,7 +230,6 @@ def execute_v31_audit(data: dict) -> str:
                 "odds": round(100.0 / p_combo * 1.085, 2),
                 "real_prob": p_combo
             })
-
     best_pick = None
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
