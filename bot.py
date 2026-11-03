@@ -47,7 +47,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     for e in header_elements_bottom_up:
         txt = e['text']
         if re.search(r'\s+[-—–]\s+', txt):
-            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера)', txt.lower()):
+            if not re.search(r'\d{2}:\d{2}', txt) and not re.search(r'(тур|часть|сегодня|вчера|трансляция)', txt.lower()):
                 parts = re.split(r'\s+[-—–]\s+', txt)
                 if len(parts) >= 2:
                     match_title = f"{parts[0].strip()} — {parts[1].strip()}"
@@ -65,24 +65,31 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         y_1x2 = 450
 
     # ==========================================
-    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (СТРОГО ПОД ЛОГОТИПАМИ)
+    # СКАНИРОВАНИЕ ФОРМЫ КОМАНД (ПОД ЛОГОТИПАМИ)
     # ==========================================
     form_debug_lines = [f"<b>[DEBUG FORM] Матч: {match_title}</b>", f"Якорь 1X2 найден на y={y_1x2}"]
-    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P', '8']
+    form_allowed_chars = ['В', 'Н', 'П', 'V', 'H', 'N', 'P', '8', 'B']
     t1_form_raw = []
     t2_form_raw = []
 
-    # Зона формы: строго под логотипами команд (по вертикали между y=180 и y=240)
     for e in elements:
-        if 180 <= e['y'] <= 240:
-            form_debug_lines.append(f"y={e['y']}, x={e['x']}, txt: '{e['text']}'")
-            txt = e['text'].upper().strip()
-            for char in txt:
+        if 130 <= e['y'] <= 230:
+            txt_raw = e['text'].strip()
+            txt_lower = txt_raw.lower()
+            if any(w in txt_lower for w in ['сегодня', 'вчера', 'трансляция', 'тур', 'лига', 'футбол', 'барнаул', 'дзержинск', 'динамо', 'химик', 'трансляция']):
+                continue
+            if re.search(r'\d{2}:\d{2}', txt_raw) or re.search(r'\d{1,2}\.\d{1,2}', txt_raw):
+                continue
+            
+            form_debug_lines.append(f"y={e['y']}, x={e['x']}, txt: '{txt_raw}'")
+            cleaned_box_text = txt_raw.upper().replace(' ', '')
+            for char in cleaned_box_text:
                 if char in form_allowed_chars:
                     clean_char = (char.replace('V', 'В')
                                       .replace('H', 'Н')
                                       .replace('N', 'Н')
                                       .replace('P', 'П')
+                                      .replace('B', 'В')
                                       .replace('8', 'Н'))
                     if clean_char in ['В', 'Н', 'П']:
                         if e['x'] < screen_center_x:
@@ -186,7 +193,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА»
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (С УЧЕТОМ ЗНАКОВ СЛЕВА И СПРАВА)
     scanned_handicaps = []
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
     if handicap_anchor:
@@ -195,40 +202,58 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
         for e in elements:
             if handicap_anchor['y'] < e['y'] < handicap_end_y:
-                raw_txt = e['text'].upper().replace('O', '0').replace('О', '0').replace(',', '.').replace(' ', '').rstrip('+')
-                if re.match(r'^([-+]?\d+(\.\d+)?|0(\.0)?)$', raw_txt) or raw_txt in ['0', '0.0', '0.00']:
-                    try:
-                        match_num = re.search(r'([-+]?\d+(\.\d+)?)', raw_txt)
-                        if match_num:
-                            h_str = match_num.group(1)
-                            h_val = float(h_str)
-                            
-                            row_odds = []
-                            for item in elements:
-                                if abs(item['y'] - e['y']) <= 10 and handicap_anchor['y'] < item['y'] < handicap_end_y:
-                                    c_text = item['text'].replace(',', '.').replace(' ', '')
-                                    found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                                    for f_num in found:
-                                        try:
-                                            val = float(f_num)
-                                            if val == abs(h_val) and abs(item['x'] - e['x']) < 15:
-                                                continue
-                                            if 1.01 <= val <= 50.0:
-                                                row_odds.append((item['x'], val))
-                                        except ValueError:
-                                            continue
-                            row_odds.sort(key=lambda x: x[0])
-                            left_vals = [v[1] for v in row_odds if v[0] < e['x']]
-                            right_vals = [v[1] for v in row_odds if v[0] > e['x']]
-                            if left_vals and right_vals:
-                                if not any(h['line'] == h_val for h in scanned_handicaps):
-                                    scanned_handicaps.append({
-                                        "line": h_val,
-                                        "h1": left_vals[-1],
-                                        "h2": right_vals[0]
-                                    })
-                    except (ValueError, IndexError):
-                        continue
+                raw_txt = e['text'].strip()
+                match_num = re.search(r'(\d+(\.\d+)?)', raw_txt)
+                if match_num:
+                    val_str = match_num.group(1)
+                    val = float(val_str)
+                    
+                    if raw_txt.startswith('-') or (raw_txt.find('-') != -1 and raw_txt.find('-') < raw_txt.find(val_str) and not raw_txt.startswith('+')):
+                        h1_val = -val
+                        h2_val = val
+                    elif raw_txt.startswith('+') or raw_txt.find('+') < raw_txt.find(val_str):
+                        h1_val = val
+                        h2_val = -val
+                    else:
+                        if val == 0.0:
+                            h1_val = 0.0
+                            h2_val = 0.0
+                        else:
+                            if '-' in raw_txt and raw_txt.index('-') > raw_txt.find(val_str):
+                                h1_val = val
+                                h2_val = -val
+                            elif '+' in raw_txt and raw_txt.index('+') > raw_txt.find(val_str):
+                                h1_val = -val
+                                h2_val = val
+                            else:
+                                h1_val = val
+                                h2_val = -val
+
+                    row_odds = []
+                    for item in elements:
+                        if abs(item['y'] - e['y']) <= 12 and handicap_anchor['y'] < item['y'] < handicap_end_y:
+                            c_text = item['text'].replace(',', '.').replace(' ', '')
+                            found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                            for f_num in found:
+                                try:
+                                    f_val = float(f_num)
+                                    if f_val == val and abs(item['x'] - e['x']) < 15:
+                                        continue
+                                    if 1.01 <= f_val <= 50.0:
+                                        row_odds.append((item['x'], f_val))
+                                except ValueError:
+                                    continue
+                    row_odds.sort(key=lambda x: x[0])
+                    left_vals = [v[1] for v in row_odds if v[0] < e['x']]
+                    right_vals = [v[1] for v in row_odds if v[0] > e['x']]
+                    if left_vals and right_vals:
+                        if not any(h['h1_val'] == h1_val for h in scanned_handicaps):
+                            scanned_handicaps.append({
+                                "h1_val": h1_val,
+                                "h2_val": h2_val,
+                                "h1": left_vals[-1],
+                                "h2": right_vals[0]
+                            })
 
     k_tu25, k_tb25 = None, None
     for t in scanned_totals:
@@ -332,48 +357,42 @@ def execute_v31_audit(data: dict) -> str:
                 markets_to_test.append({"name": f"Тотал больше ({line})", "odds": round(100.0 / p_tb * 1.055, 2), "real_prob": p_tb})
 
     for h_item in data.get("scanned_handicaps", []):
-        h_val = h_item["line"]
-        if h_val == 0.0:
-            prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if i > j)
-            prob_draw = sum(grid[i, j] for i in range(10) for j in range(10) if i == j)
-            markets_to_test.append({
-                "name": "Фора 1 (0)", 
-                "odds": h_item["h1"], 
-                "real_prob": prob_h1 + (prob_draw * 0.5)
-            })
-            markets_to_test.append({
-                "name": "Фора 2 (0)", 
-                "odds": h_item["h2"], 
-                "real_prob": (100.0 - prob_h1 - prob_draw) + (prob_draw * 0.5)
-            })
-        elif h_val.is_integer():
-            h_int = int(h_val)
-            prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > h_int)
-            prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) == h_int)
-            markets_to_test.append({
-                "name": f"Фора 1 ({h_val:+.1f})", 
-                "odds": h_item["h1"], 
-                "real_prob": prob_win + (prob_push * 0.5)
-            })
-            
-            prob_win_2 = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > -h_int)
-            prob_push_2 = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) == -h_int)
-            markets_to_test.append({
-                "name": f"Фора 2 ({(-h_val):+.1f})", 
-                "odds": h_item["h2"], 
-                "real_prob": prob_win_2 + (prob_push_2 * 0.5)
-            })
+        h1_val = h_item["h1_val"]
+        h2_val = h_item["h2_val"]
+        
+        # Фора 1
+        if h1_val == 0.0:
+            prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if i > j) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
+        elif h1_val.is_integer():
+            h_int = int(h1_val)
+            prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h_int)
+            prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) == -h_int)
+            prob_h1 = prob_win + (prob_push * 0.5)
         else:
-            markets_to_test.append({
-                "name": f"Фора 1 ({h_val:+.1f})", 
-                "odds": h_item["h1"], 
-                "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h_val)
-            })
-            markets_to_test.append({
-                "name": f"Фора 2 ({-h_val:+.1f})", 
-                "odds": h_item["h2"], 
-                "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > h_val)
-            })
+            prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h1_val)
+
+        markets_to_test.append({
+            "name": f"Фора 1 ({h1_val:+.1f})", 
+            "odds": h_item["h1"], 
+            "real_prob": prob_h1
+        })
+
+        # Фора 2
+        if h2_val == 0.0:
+            prob_h2 = sum(grid[i, j] for i in range(10) for j in range(10) if j > i) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
+        elif h2_val.is_integer():
+            h_int = int(h2_val)
+            prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > -h_int)
+            prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) == -h_int)
+            prob_h2 = prob_win + (prob_push * 0.5)
+        else:
+            prob_h2 = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > -h2_val)
+
+        markets_to_test.append({
+            "name": f"Фора 2 ({h2_val:+.1f})", 
+            "odds": h_item["h2"], 
+            "real_prob": prob_h2
+        })
 
     combo_markets = [
         ("П1 и ТБ(2.5)", lambda i, j: i > j and (i + j) > 2.5),
@@ -446,7 +465,7 @@ def execute_v31_audit(data: dict) -> str:
         form_bonus = (wins_count - losses_count) * 2
 
     totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data["scanned_totals"]]) if data["scanned_totals"] else "Не найдены"
-    hc_str = ", ".join([f"{h['line']:+.1f} (к1:{h['h1']}/к2:{h['h2']})" for h in data["scanned_handicaps"]]) if data["scanned_handicaps"] else "Не найдены"
+    hc_str = ", ".join([f"Ф1({h['h1_val']:+.1f}):{h['h1']} / Ф2({h['h2_val']:+.1f}):{h['h2']}" for h in data["scanned_handicaps"]]) if data["scanned_handicaps"] else "Не найдены"
     form_str = ", ".join(data["form_tokens"]) if data["form_tokens"] else "Не считывались"
 
     if best_pick:
