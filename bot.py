@@ -204,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ЖЕЛЕЗОБЕТОННЫЙ УЧЕТ ФОРЫ 0, БУКВ O/o И ПРАВИЛЬНЫХ ЗНАКОВ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ЖЕЛЕЗОБЕТОННЫЙ УЧЕТ ФОРЫ 0 БЕЗ ЦИФР И ПРАВИЛЬНЫЕ ЗНАКИ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -266,13 +266,31 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                         except ValueError:
                             continue
 
-            if val is None or center_val_elem is None:
-                if any(t.upper() in ['O', 'О'] for t in [el['text'].strip() for el in row_elems] if abs(el['x'] - screen_center_x) < 50):
+            # Спец-проверка для Winline: если в строке нет явных цифр форы, но слева и справа есть ровно по коэффициенту — это Фора 0
+            if val is None:
+                temp_left = []
+                temp_right = []
+                for el in row_elems:
+                    c_text = el['text'].replace(',', '.').replace(' ', '')
+                    found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                    for f_num in found:
+                        try:
+                            f_val = float(f_num)
+                            if 1.01 <= f_val <= 50.0:
+                                if el['x'] < screen_center_x:
+                                    temp_left.append((el['x'], f_val))
+                                else:
+                                    temp_right.append((el['x'], f_val))
+                        except ValueError:
+                            continue
+                
+                if temp_left and temp_right and not any(re.search(r'\d+', el['text']) and float(re.search(r'\d+', el['text']).group()) <= 5 for el in row_elems if 'П1' not in el['text'] and 'П2' not in el['text']):
                     val = 0.0
-                    center_val_elem = row_elems[len(row_elems)//2]
+                    center_val_elem = {'x': (temp_left[0][0] + temp_right[0][0]) / 2, 'text': '0'}
                     raw_hc_token = "0.0"
-                else:
-                    continue
+
+            if val is None:
+                continue
 
             if val > 5.0:
                 continue
@@ -290,7 +308,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 elif '+' in raw_hc_token:
                     is_h1_negative = False
                 else:
-                    left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < center_val_elem['x']]
+                    left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < (center_val_elem['x'] if isinstance(center_val_elem, dict) else screen_center_x)]
                     if left_minuses:
                         is_h1_negative = True
 
@@ -306,7 +324,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             right_odds = []
 
             for el in row_elems:
-                if el == center_val_elem:
+                if center_val_elem and isinstance(center_val_elem, dict) and 'text' in center_val_elem and el == center_val_elem:
                     continue
                 c_text = el['text'].replace(',', '.').replace(' ', '')
                 found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
@@ -316,9 +334,9 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                         if val != 0.0 and f_val == val:
                             continue
                         if 1.01 <= f_val <= 50.0:
-                            if el['x'] < center_val_elem['x']:
+                            if el['x'] < (center_val_elem['x'] if isinstance(center_val_elem, dict) else screen_center_x):
                                 left_odds.append(f_val)
-                            elif el['x'] > center_val_elem['x']:
+                            else:
                                 right_odds.append(f_val)
                     except ValueError:
                         continue
