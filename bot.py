@@ -204,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ОБНОВЛЕННЫЙ АЛГОРИТМ С ИГНОРИРОВАНИЕМ МУСОРА)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -216,6 +216,10 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         rows_map = {}
         for e in elements:
             if handicap_anchor['y'] < e['y'] < handicap_end_y:
+                txt_low = e['text'].lower()
+                if any(w in txt_low for w in ['свернуть', 'развернуть', 'маркет', 'событий', 'live', 'главная', 'сейчас', 'история', 'игры', 'кибер', 'профиль']):
+                    continue
+                
                 found_row_y = None
                 for ry in rows_map.keys():
                     if abs(ry - e['y']) <= 10:
@@ -240,27 +244,33 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 val = 0.0
                 h1_val, h2_val = 0.0, 0.0
             else:
-                match_num = re.search(r'(\d+(?:\.\d+)?)', row_full_text)
-                if match_num:
-                    try:
-                        val = float(match_num.group(1))
-                    except ValueError:
-                        continue
+                match_handicap = re.search(r'([+-]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*[+-])', row_full_text)
+                if match_handicap:
+                    raw_hc_str = match_handicap.group(1).replace(' ', '')
+                    extracted_nums = re.findall(r'\d+(?:\.\d+)?', raw_hc_str)
+                    if extracted_nums:
+                        try:
+                            val = float(extracted_nums[0])
+                        except ValueError:
+                            continue
 
-                    if val > 5.0:
-                        continue
+                        if val > 5.0 or val == 0:
+                            continue
 
-                    is_h1_negative = False
-                    for el in row_elems:
-                        t_txt = el['text']
-                        if '-' in t_txt and el['x'] < screen_center_x + 30:
-                            is_h1_negative = True
-                            break
+                        is_h1_negative = False
+                        if '-' in raw_hc_str:
+                            if raw_hc_str.startswith('-') or raw_hc_str.endswith('+'):
+                                is_h1_negative = True
+                        else:
+                            for el in row_elems:
+                                if '-' in el['text'] and el['x'] < screen_center_x + 30:
+                                    is_h1_negative = True
+                                    break
 
-                    if is_h1_negative:
-                        h1_val, h2_val = -val, val
-                    else:
-                        h1_val, h2_val = val, -val
+                        if is_h1_negative:
+                            h1_val, h2_val = -val, val
+                        else:
+                            h1_val, h2_val = val, -val
 
             if val is None or h1_val in seen_handicap_lines:
                 continue
