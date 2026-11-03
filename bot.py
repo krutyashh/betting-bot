@@ -204,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ПОДДЕРЖКА ФОРЫ 0 И ВСЕХ ТИПОВ ЛИНИЙ СО ЗНАКАМИ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ЖЕЛЕЗОБЕТОННЫЙ УЧЕТ ФОРЫ 0, БУКВ O/o И ПРАВИЛЬНЫХ ЗНАКОВ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -238,58 +238,70 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
             val = None
             center_val_elem = None
+            raw_hc_token = ""
 
-            # Ищем элемент, который содержит точный номинал форы (0 или число со знаком)
             for el in row_elems:
-                clean_txt = el['text'].replace(',', '.').replace(' ', '')
+                clean_txt = el['text'].strip().replace(',', '.').replace(' ', '')
+                clean_upper = clean_txt.upper()
                 
-                # Точное распознавание форы 0
-                if clean_txt in ['0', '0.0']:
+                if clean_upper in ['0', '0.0', 'O', 'О']:
                     val = 0.0
                     center_val_elem = el
+                    raw_hc_token = "0.0"
                     break
                 
-                # Ищем шаблон форы со знаком (+ или -)
-                match_hc = re.search(r'([+-]\d+(?:\.\d+)?)', clean_txt)
+                match_hc = re.search(r'([+-]?\d+(?:\.\d+)?[+-]?)', clean_txt)
                 if match_hc:
-                    try:
-                        potential_val = float(match_hc.group(1).replace('+', '').replace('-', ''))
-                        if 0.0 <= potential_val <= 5.0:
-                            val = potential_val
-                            center_val_elem = el
-                            break
-                    except ValueError:
-                        continue
+                    extracted_str = match_hc.group(1)
+                    num_match = re.search(r'\d+(?:\.\d+)?', extracted_str)
+                    if num_match:
+                        try:
+                            potential_val = float(num_match.group(0))
+                            if 0.0 <= potential_val <= 5.0:
+                                if '+' in extracted_str or '-' in extracted_str or potential_val == 0.0 or abs(el['x'] - screen_center_x) < 70:
+                                    val = potential_val
+                                    center_val_elem = el
+                                    raw_hc_token = extracted_str
+                                    break
+                        except ValueError:
+                            continue
 
             if val is None or center_val_elem is None:
-                continue
+                if any(t.upper() in ['O', 'О'] for t in [el['text'].strip() for el in row_elems] if abs(el['x'] - screen_center_x) < 50):
+                    val = 0.0
+                    center_val_elem = row_elems[len(row_elems)//2]
+                    raw_hc_token = "0.0"
+                else:
+                    continue
 
             if val > 5.0:
                 continue
 
-            # Определяем знак для первой команды
             is_h1_negative = False
-            elem_text_lower = center_val_elem['text']
             
-            if '-' in elem_text_lower or row_full_text.strip().startswith('-'):
-                is_h1_negative = True
-            
-            if not is_h1_negative:
-                left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < center_val_elem['x']]
-                if left_minuses:
-                    is_h1_negative = True
-
             if val == 0.0:
                 h1_val, h2_val = 0.0, 0.0
-            elif is_h1_negative:
-                h1_val, h2_val = -val, val
             else:
-                h1_val, h2_val = val, -val
+                if '-' in raw_hc_token:
+                    if raw_hc_token.startswith('-') or raw_hc_token.endswith('+'):
+                        is_h1_negative = True
+                elif '+' in raw_hc_token and raw_hc_token.endswith('-'):
+                    is_h1_negative = False
+                elif '+' in raw_hc_token:
+                    is_h1_negative = False
+                else:
+                    left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < center_val_elem['x']]
+                    if left_minuses:
+                        is_h1_negative = True
+
+                if is_h1_negative:
+                    h1_val, h2_val = -val, val
+                else:
+                    h1_val, h2_val = val, -val
 
             if h1_val in seen_handicap_lines:
                 continue
 
-            # Собираем коэффициенты строго слева (П1) и справа (П2) от центрального элемента форы
             left_odds = []
             right_odds = []
 
@@ -301,6 +313,8 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 for f_num in found:
                     try:
                         f_val = float(f_num)
+                        if val != 0.0 and f_val == val:
+                            continue
                         if 1.01 <= f_val <= 50.0:
                             if el['x'] < center_val_elem['x']:
                                 left_odds.append(f_val)
