@@ -204,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ТОЧНЫЙ ПОИСК ЦЕНТРАЛЬНОГО ЗНАЧЕНИЯ ФОРЫ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ПОДДЕРЖКА ФОРЫ 0 И ВСЕХ ТИПОВ ЛИНИЙ СО ЗНАКАМИ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -236,52 +236,48 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             
             form_debug_lines.append(f"[DEBUG HC ROW] y={row_y} | текст: '{row_full_text}'")
 
-            center_val_elem = None
             val = None
+            center_val_elem = None
 
+            # Ищем элемент, который содержит точный номинал форы (0 или число со знаком)
             for el in row_elems:
-                clean_el_text = el['text'].replace(',', '.').replace(' ', '')
-                if clean_el_text in ['0', '0.0']:
+                clean_txt = el['text'].replace(',', '.').replace(' ', '')
+                
+                # Точное распознавание форы 0
+                if clean_txt in ['0', '0.0']:
                     val = 0.0
                     center_val_elem = el
                     break
                 
-                match_val = re.search(r'([+-]?\d+(?:\.\d+)?)', clean_el_text)
-                if match_val:
+                # Ищем шаблон форы со знаком (+ или -)
+                match_hc = re.search(r'([+-]\d+(?:\.\d+)?)', clean_txt)
+                if match_hc:
                     try:
-                        potential_val = float(match_val.group(1))
+                        potential_val = float(match_hc.group(1).replace('+', '').replace('-', ''))
                         if 0.0 <= potential_val <= 5.0:
-                            if ('+' in clean_el_text or '-' in clean_el_text or potential_val == 0.0 or abs(el['x'] - screen_center_x) < 80):
-                                val = potential_val
-                                center_val_elem = el
-                                break
+                            val = potential_val
+                            center_val_elem = el
+                            break
                     except ValueError:
                         continue
 
             if val is None or center_val_elem is None:
-                match_hc = re.search(r'([+-]\d+(?:\.\d+)?)', row_full_text)
-                if match_hc:
-                    try:
-                        val = float(match_hc.group(1))
-                    except ValueError:
-                        continue
-                elif ' 0 ' in row_full_text or row_full_text.strip() == '0':
-                    val = 0.0
-                else:
-                    continue
+                continue
 
             if val > 5.0:
                 continue
 
+            # Определяем знак для первой команды
             is_h1_negative = False
-            if '-' in row_full_text:
-                minus_elems = [el for el in row_elems if '-' in el['text'] and el['x'] < screen_center_x]
-                if minus_elems or row_full_text.strip().startswith('-'):
+            elem_text_lower = center_val_elem['text']
+            
+            if '-' in elem_text_lower or row_full_text.strip().startswith('-'):
+                is_h1_negative = True
+            
+            if not is_h1_negative:
+                left_minuses = [el for el in row_elems if '-' in el['text'] and el['x'] < center_val_elem['x']]
+                if left_minuses:
                     is_h1_negative = True
-
-            for el in row_elems:
-                if '+' in el['text'] and el['x'] < screen_center_x:
-                    is_h1_negative = False
 
             if val == 0.0:
                 h1_val, h2_val = 0.0, 0.0
@@ -289,13 +285,11 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 h1_val, h2_val = -val, val
             else:
                 h1_val, h2_val = val, -val
-                for el in row_elems:
-                    if '-' in el['text'] and el['x'] > screen_center_x:
-                        h1_val, h2_val = -val, val
 
             if h1_val in seen_handicap_lines:
                 continue
 
+            # Собираем коэффициенты строго слева (П1) и справа (П2) от центрального элемента форы
             left_odds = []
             right_odds = []
 
@@ -308,9 +302,9 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     try:
                         f_val = float(f_num)
                         if 1.01 <= f_val <= 50.0:
-                            if el['x'] < screen_center_x:
+                            if el['x'] < center_val_elem['x']:
                                 left_odds.append(f_val)
-                            else:
+                            elif el['x'] > center_val_elem['x']:
                                 right_odds.append(f_val)
                     except ValueError:
                         continue
