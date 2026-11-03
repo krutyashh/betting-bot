@@ -15,15 +15,32 @@ bot = telebot.TeleBot(TOKEN)
 
 GEMINI_KEY = os.getenv('GEMINI_KEY')
 
-# Инициализация Gemini API
+# Инициализация Gemini API с динамическим поиском рабочей модели (защита от 404)
 genai.configure(api_key=GEMINI_KEY)
-gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+gemini_model = None
+target_models = ['gemini-1.5-flash', 'gemini-1.5-flash-002', 'gemini-1.5-flash-001', 'gemini-2.0-flash']
+
+try:
+    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    chosen_model_name = next((m for m in target_models if any(m in model_item for model_item in available_models)), None)
+    
+    if chosen_model_name:
+        gemini_model = genai.GenerativeModel(chosen_model_name)
+        print(f"✅ Успешно выбрана модель Gemini: {chosen_model_name}")
+    else:
+        fallback = next((m.name for m in genai.list_models() if 'flash' in m.name.lower()), 'gemini-1.5-flash')
+        gemini_model = genai.GenerativeModel(fallback)
+        print(f"⚠️ Использована резервная модель: {fallback}")
+except Exception as e:
+    print(f"⚠️ Ошибка автоопределения моделей: {e}. Пробуем дефолтную 'gemini-1.5-flash'.")
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 print("Gemini API успешно инициализирован.")
 
 def parse_screenshot(image_bytes: bytes) -> dict:
     """
-    Отправляет скриншот в Gemini 1.5 Flash. Если данные нечитаемы или отсутствуют,
+    Отправляет скриншот в Gemini Flash. Если данные нечитаемы или отсутствуют,
     выбрасывает исключение — никаких выдуманных дефолтных котировок.
     """
     prompt = """
@@ -136,6 +153,7 @@ def execute_v31_audit(data: dict) -> str:
     except ZeroDivisionError:
         xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
 
+    import numpy as np
     grid = np.zeros((10, 10))
     score_probs = []
     for i in range(10):
@@ -374,7 +392,7 @@ def func_start(message):
 
 @bot.message_handler(content_types=['photo'])
 def func_handle_photo(message):
-    processing_msg = bot.reply_to(message, "🛡️ Анализируем скриншот через Gemini 1.5 Flash...")
+    processing_msg = bot.reply_to(message, "🛡️ Анализируем скриншот через Gemini Flash...")
     try:
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
@@ -385,15 +403,15 @@ def func_handle_photo(message):
         bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
     except Exception as e:
         tb_str = traceback.format_exc()
-        # Безопасное экранирование тегов для HTML в Telegram
         safe_tb = tb_str.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        error_message = f"❌ <b>Ошибка аудита:</b>\n<pre>{safe_tb}</pre>"
         
-        if len(error_message) > 4000:
-            error_message = error_message[:4000] + "\n...[обрезано]"
+        if len(safe_tb) > 3500:
+            safe_tb = safe_tb[:3500] + "\n...[обрезано]"
+            
+        error_message = f"❌ <b>Ошибка аудита:</b>\n<pre>{safe_tb}</pre>"
         bot.edit_message_text(error_message, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
 
 
 if __name__ == "__main__":
-    print("Бот v3.1 (Gemini Vision + Advanced Form Rules) успешно запущен...")
+    print("Бот v3.1 (Gemini Vision + Dynamic Model Loader) успешно запущен...")
     bot.infinity_polling()
