@@ -17,7 +17,7 @@ GEMINI_KEY = os.getenv('GEMINI_KEY')
 
 # Инициализация Gemini API с актуальной моделью gemini-2.5-flash
 genai.configure(api_key=GEMINI_KEY)
-gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+gemini_model = genai.GenerativeModel('gemini-3.8-flash')
 
 print("Gemini API успешно инициализирован с моделью gemini-2.5-flash.")
 
