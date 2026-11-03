@@ -204,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ЖЕЛЕЗОБЕТОННЫЙ УЧЕТ ФОРЫ 0 БЕЗ ЦИФР И ПРАВИЛЬНЫЕ ЗНАКИ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ЖЕЛЕЗОБЕТОННЫЙ ЗАХВАТ ФОРЫ 0 И ТОЧНЫЙ ПАРСИНГ НОМИНАЛОВ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -240,33 +240,39 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             center_val_elem = None
             raw_hc_token = ""
 
+            # Проверяем на явную фору 0 или буквы O/О по центру
+            is_explicit_zero = False
             for el in row_elems:
                 clean_txt = el['text'].strip().replace(',', '.').replace(' ', '')
                 clean_upper = clean_txt.upper()
-                
-                if clean_upper in ['0', '0.0', 'O', 'О']:
+                if clean_upper in ['0', '0.0', 'O', 'О'] and abs(el['x'] - screen_center_x) < 60:
+                    is_explicit_zero = True
                     val = 0.0
                     center_val_elem = el
                     raw_hc_token = "0.0"
                     break
-                
-                match_hc = re.search(r'([+-]?\d+(?:\.\d+)?[+-]?)', clean_txt)
-                if match_hc:
-                    extracted_str = match_hc.group(1)
-                    num_match = re.search(r'\d+(?:\.\d+)?', extracted_str)
-                    if num_match:
-                        try:
-                            potential_val = float(num_match.group(0))
-                            if 0.0 <= potential_val <= 5.0:
-                                if '+' in extracted_str or '-' in extracted_str or potential_val == 0.0 or abs(el['x'] - screen_center_x) < 70:
-                                    val = potential_val
-                                    center_val_elem = el
-                                    raw_hc_token = extracted_str
-                                    break
-                        except ValueError:
-                            continue
 
-            # Спец-проверка для Winline: если в строке нет явных цифр форы, но слева и справа есть ровно по коэффициенту — это Фора 0
+            # Если явного нуля нет, ищем числовой номинал форы со знаком (+/-)
+            if not is_explicit_zero:
+                for el in row_elems:
+                    clean_txt = el['text'].strip().replace(',', '.').replace(' ', '')
+                    match_hc = re.search(r'([+-]?\d+(?:\.\d+)?[+-]?)', clean_txt)
+                    if match_hc:
+                        extracted_str = match_hc.group(1)
+                        num_match = re.search(r'\d+(?:\.\d+)?', extracted_str)
+                        if num_match:
+                            try:
+                                potential_val = float(num_match.group(0))
+                                if 0.0 <= potential_val <= 5.0:
+                                    if '+' in extracted_str or '-' in extracted_str or abs(el['x'] - screen_center_x) < 70:
+                                        val = potential_val
+                                        center_val_elem = el
+                                        raw_hc_token = extracted_str
+                                        break
+                            except ValueError:
+                                continue
+
+            # Спец-проверка: если в строке вообще нет цифр форы, но слева и справа есть ровно по коэффициенту -> это 100% Фора 0
             if val is None:
                 temp_left = []
                 temp_right = []
@@ -284,7 +290,9 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                         except ValueError:
                             continue
                 
-                if temp_left and temp_right and not any(re.search(r'\d+', el['text']) and float(re.search(r'\d+', el['text']).group()) <= 5 for el in row_elems if 'П1' not in el['text'] and 'П2' not in el['text']):
+                has_other_digits = any(re.search(r'\d+', el['text']) and float(re.search(r'\d+', el['text']).group()) <= 5 for el in row_elems if 'П1' not in el['text'] and 'П2' not in el['text'])
+                
+                if temp_left and temp_right and not has_other_digits:
                     val = 0.0
                     center_val_elem = {'x': (temp_left[0][0] + temp_right[0][0]) / 2, 'text': '0'}
                     raw_hc_token = "0.0"
@@ -322,6 +330,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
             left_odds = []
             right_odds = []
+            center_x_coord = center_val_elem['x'] if isinstance(center_val_elem, dict) else screen_center_x
 
             for el in row_elems:
                 if center_val_elem and isinstance(center_val_elem, dict) and 'text' in center_val_elem and el == center_val_elem:
@@ -334,7 +343,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                         if val != 0.0 and f_val == val:
                             continue
                         if 1.01 <= f_val <= 50.0:
-                            if el['x'] < (center_val_elem['x'] if isinstance(center_val_elem, dict) else screen_center_x):
+                            if el['x'] < center_x_coord:
                                 left_odds.append(f_val)
                             else:
                                 right_odds.append(f_val)
