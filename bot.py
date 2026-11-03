@@ -50,7 +50,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             # Отсекаем мусор, счетчик баланса, время и слова БК
             if any(w in txt_low for w in ['тур', 'сегодня', 'вчера', 'трансляция', 'футбол', 'лига', 'матч', 'основное', 'винлайн', 'winline', '₽', '33', '35']):
                 continue
-            if re.search(r'\d{2}:\d{2}', txt) or re.search(r'^\d+$', txt) or len(txt) <= 1:
+            if re.search(r'\d{2}:\d{2}', txt) or len(txt) <= 1:
                 continue
             team_candidates.append(e)
 
@@ -60,7 +60,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         t2_name = team_candidates[-1]['text']
         match_title = f"{t1_name} — {t2_name}"
     else:
-        # Запасной варіант: поиск единственной строки с дефисом в шапке
+        # Запасной вариант: поиск единственной строки с дефисом в шапке
         for e in elements:
             if 50 <= e['y'] <= 250 and re.search(r'\s+[-—–]\s+', e['text']):
                 txt = e['text']
@@ -124,12 +124,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     t2_form = [item['char'] for item in t2_form_raw][-5:]
 
     form_debug_lines.append(f"<b>ИТОГ Т1:</b> {t1_form} | <b>ИТОГ Т2:</b> {t2_form}")
-    form_log_str = "\n".join(form_debug_lines)
-
-    if len(t1_form) >= 3 and len(t2_form) >= 3:
-        form_tokens = t1_form + t2_form
-    else:
-        form_tokens = []
 
     def extract_odds_in_zone(y_start, y_end):
         zone_items = []
@@ -210,7 +204,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ПОЛНАЯ ПОДДЕРЖКА ЗАПИСЕЙ +2.5-, -1.5+, 0)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
@@ -236,51 +230,41 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             row_elems.sort(key=lambda item: item['x'])
             row_full_text = " ".join([el['text'] for el in row_elems])
             
+            # ДЕБАГ-ЛОГ СТРОКИ ФОРЫ
+            form_debug_lines.append(f"[DEBUG HC ROW] y={row_y} | текст: '{row_full_text}'")
+
             val = None
             h1_val, h2_val = 0.0, 0.0
 
-            # 1. Проверка на нулевую фору (0)
             if re.search(r'\b0\b', row_full_text) and not re.search(r'[1-9]', row_full_text.replace('0', '', 1)):
                 val = 0.0
                 h1_val, h2_val = 0.0, 0.0
             else:
-                # 2. Поиск значений вида +2.5-, -1.5+, +1.5, -2.5
-                match_val = re.search(r'([+-]?\s*\d+(?:\.\d+)?\s*[+-]?)', row_full_text)
-                if match_val:
-                    raw_str = match_val.group(1).replace(' ', '')
-                    extracted_nums = re.findall(r'\d+(?:\.\d+)?', raw_str)
-                    if extracted_nums:
-                        try:
-                            val = float(extracted_nums[0])
-                        except ValueError:
-                            continue
+                match_num = re.search(r'(\d+(?:\.\d+)?)', row_full_text)
+                if match_num:
+                    try:
+                        val = float(match_num.group(1))
+                    except ValueError:
+                        continue
 
-                        if val > 5.0:
-                            continue
+                    if val > 5.0:
+                        continue
 
-                        # Определяем знаки по расположению символа '-' или '+'
-                        if '-' in raw_str:
-                            # Если минус стоит перед числом или после него (например, -2.5 или +2.5-)
-                            if raw_str.startswith('-') or raw_str.endswith('+'):
-                                h1_val, h2_val = -val, val
-                            else:
-                                h1_val, h2_val = val, -val
-                        elif '+' in raw_str:
-                            if raw_str.startswith('+'):
-                                h1_val, h2_val = val, -val
-                            else:
-                                h1_val, h2_val = -val, val
-                        else:
-                            avg_x = sum(el['x'] for el in row_elems) / len(row_elems)
-                            if avg_x < screen_center_x:
-                                h1_val, h2_val = val, -val
-                            else:
-                                h1_val, h2_val = -val, val
+                    is_h1_negative = False
+                    for el in row_elems:
+                        t_txt = el['text']
+                        if '-' in t_txt and el['x'] < screen_center_x + 30:
+                            is_h1_negative = True
+                            break
+
+                    if is_h1_negative:
+                        h1_val, h2_val = -val, val
+                    else:
+                        h1_val, h2_val = val, -val
 
             if val is None or h1_val in seen_handicap_lines:
                 continue
 
-            # Собираем коэффициенты в строке
             row_odds = []
             for el in row_elems:
                 c_text = el['text'].replace(',', '.').replace(' ', '')
@@ -299,6 +283,9 @@ def parse_screenshot(image_bytes: bytes) -> dict:
             left_vals = [v[1] for v in row_odds if v[0] < screen_center_x]
             right_vals = [v[1] for v in row_odds if v[0] > screen_center_x]
 
+            # ДЕБАГ-ЛОГ НАЙДЕННЫХ ЗНАЧЕНИЙ
+            form_debug_lines.append(f"-> Распознано: Ф1={h1_val:+.1f} (кэфы слева: {left_vals}), Ф2={h2_val:+.1f} (кэфы справа: {right_vals})")
+
             if left_vals and right_vals:
                 scanned_handicaps.append({
                     "h1_val": h1_val,
@@ -307,6 +294,13 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     "h2": right_vals[-1]
                 })
                 seen_handicap_lines.add(h1_val)
+
+    form_log_str = "\n".join(form_debug_lines)
+
+    if len(t1_form) >= 3 and len(t2_form) >= 3:
+        form_tokens = t1_form + t2_form
+    else:
+        form_tokens = []
 
     k_tu25, k_tb25 = None, None
     for t in scanned_totals:
@@ -370,7 +364,7 @@ def execute_v31_audit(data: dict) -> str:
     if 69.0 <= top4_prob <= 72.0 and (top4_prob + 3.0) > 72.0:
         cascade_passed = False
 
-    teams = re.split(r'\s*[-—–]\s*', data['match'])
+    teams = re.split(r'\s+[-—–]\s+', data['match'])
     t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
     t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
 
