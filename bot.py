@@ -196,10 +196,14 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                     except ValueError:
                         continue
 
-    # 5. СКАНИРУЕМ БЛОК «ФОРА» (БЕЗ ДУБЛЕЙ)
+    # 5. СКАНИРУЕМ БЛОК «ФОРА» (ИСПРАВЛЕННЫЙ ТОЧНЫЙ ПАРСИНГ)
     scanned_handicaps = []
     seen_handicap_lines = set()
     handicap_anchor = next((b for b in block_anchors if b['type'] == 'handicap'), None)
+    
+    # Допустимые стандартные шаги футбольных фор
+    valid_handicap_values = {0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0}
+
     if handicap_anchor:
         next_anchors = [b['y'] for b in block_anchors if b['y'] > handicap_anchor['y']]
         handicap_end_y = min(next_anchors) if next_anchors else img.shape[0]
@@ -207,61 +211,82 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         for e in elements:
             if handicap_anchor['y'] < e['y'] < handicap_end_y:
                 raw_txt = e['text'].strip()
+                
+                # Ищем числовое значение
                 match_num = re.search(r'(\d+(\.\d+)?)', raw_txt)
-                if match_num:
-                    val_str = match_num.group(1)
-                    val = float(val_str)
+                if not match_num:
+                    continue
                     
-                    if val > 10.0:
-                        continue
+                val_str = match_num.group(1)
+                try:
+                    val = float(val_str)
+                except ValueError:
+                    continue
 
-                    # Определяем знак форы
-                    has_minus_before = raw_txt.find('-') != -1 and raw_txt.find('-') < raw_txt.find(val_str)
-                    has_plus_before = raw_txt.find('+') != -1 and raw_txt.find('+') < raw_txt.find(val_str)
+                # Отсекаем коэффициенты и мусор, проверяя строго по разрешенным шагам фор
+                if val not in valid_handicap_values:
+                    continue
 
-                    if has_plus_before:
-                        h1_val, h2_val = val, -val
-                    elif has_minus_before:
+                # Жестко определяем знак (+ или -) по символам в строке
+                has_minus = '-' in raw_txt
+                has_plus = '+' in raw_txt
+
+                if has_minus and not has_plus:
+                    # Если явный минус — определяем, к какой команде он относится по позиции x
+                    if e['x'] < screen_center_x:
                         h1_val, h2_val = -val, val
                     else:
-                        if val == 0.0:
-                            h1_val, h2_val = 0.0, 0.0
+                        h1_val, h2_val = val, -val
+                elif has_plus and not has_minus:
+                    if e['x'] < screen_center_x:
+                        h1_val, h2_val = val, -val
+                    else:
+                        h1_val, h2_val = -val, val
+                else:
+                    # Если знаков в текстовом блоке нет, но значение валидное (например, просто 1.5 или 0)
+                    if val == 0.0:
+                        h1_val, h2_val = 0.0, 0.0
+                    else:
+                        # По умолчанию в букмекерских линиях левая колонка идет с плюсом/минусом в зависимости от фаворита, 
+                        # но если знака нет вообще, ориентируемся на стандартную расстановку (левая фора положительная, правая отрицательная, либо наоборот)
+                        # Безопаснее определять по знаку коэффициентов или позиции:
+                        if e['x'] < screen_center_x:
+                            h1_val, h2_val = val, -val
                         else:
-                            # Проверяем положение по координате x (слева или справа от центра)
-                            if e['x'] < screen_center_x:
-                                h1_val, h2_val = val, -val
-                            else:
-                                h1_val, h2_val = -val, val
+                            h1_val, h2_val = -val, val
 
-                    # Пропускаем, если эта линия форы уже обработана
-                    if h1_val in seen_handicap_lines:
-                        continue
+                # Предотвращаем дублирование одинаковых линий
+                if h1_val in seen_handicap_lines or (-h1_val) in seen_handicap_lines:
+                    continue
 
-                    row_odds = []
-                    for item in elements:
-                        if abs(item['y'] - e['y']) <= 12 and handicap_anchor['y'] < item['y'] < handicap_end_y:
-                            c_text = item['text'].replace(',', '.').replace(' ', '')
-                            found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
-                            for f_num in found:
-                                try:
-                                    f_val = float(f_num)
-                                    if f_val == val and abs(item['x'] - e['x']) < 15:
-                                        continue
-                                    if 1.01 <= f_val <= 50.0:
-                                        row_odds.append((item['x'], f_val))
-                                except ValueError:
+                # Ищем коэффициенты строго на той же строке по вертикали (y +/- 12 пикселей)
+                row_odds = []
+                for item in elements:
+                    if abs(item['y'] - e['y']) <= 12 and handicap_anchor['y'] < item['y'] < handicap_end_y:
+                        c_text = item['text'].replace(',', '.').replace(' ', '')
+                        found = re.findall(r'\d{1,3}\.\d{1,2}', c_text)
+                        for f_num in found:
+                            try:
+                                f_val = float(f_num)
+                                if f_val == val and abs(item['x'] - e['x']) < 15:
                                     continue
-                    row_odds.sort(key=lambda x: x[0])
-                    left_vals = [v[1] for v in row_odds if v[0] < e['x']]
-                    right_vals = [v[1] for v in row_odds if v[0] > e['x']]
-                    if left_vals and right_vals:
-                        scanned_handicaps.append({
-                            "h1_val": h1_val,
-                            "h2_val": h2_val,
-                            "h1": left_vals[-1],
-                            "h2": right_vals[0]
-                        })
-                        seen_handicap_lines.add(h1_val)
+                                if 1.01 <= f_val <= 50.0:
+                                    row_odds.append((item['x'], f_val))
+                            except ValueError:
+                                continue
+                                
+                row_odds.sort(key=lambda x: x[0])
+                left_vals = [v[1] for v in row_odds if v[0] < e['x']]
+                right_vals = [v[1] for v in row_odds if v[0] > e['x']]
+                
+                if left_vals and right_vals:
+                    scanned_handicaps.append({
+                        "h1_val": h1_val,
+                        "h2_val": h2_val,
+                        "h1": left_vals[-1],
+                        "h2": right_vals[0]
+                    })
+                    seen_handicap_lines.add(h1_val)
 
     k_tu25, k_tb25 = None, None
     for t in scanned_totals:
