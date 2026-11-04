@@ -15,16 +15,16 @@ bot = telebot.TeleBot(TOKEN)
 
 GEMINI_KEY = os.getenv('GEMINI_KEY')
 
-# Инициализация Gemini API с актуальной моделью gemini-2.5-flash
+# Инициализация Gemini API с актуальной моделью gemini-3.8-flash
 genai.configure(api_key=GEMINI_KEY)
 gemini_model = genai.GenerativeModel('gemini-3.8-flash')
 
-print("Gemini API успешно инициализирован с моделью gemini-2.5-flash.")
+print("Gemini API успешно инициализирован с моделью gemini-3.8-flash.")
 
 def parse_screenshot(image_bytes: bytes) -> dict:
     """
-    Отправляет скриншот в Gemini Flash. Если данные нечитаемы или отсутствуют,
-    выбрасывает исключение — никаких выдуманных дефолтных котировок.
+    Отправляет скриншот в Gemini с жестким таймаутом, чтобы исключить зависания.
+    Если данные нечитаемы или отсутствуют, выбрасывает исключение.
     """
     prompt = """
 Ты — профессиональный спортивный аналитик и строгий парсер букмекерских линий.
@@ -39,9 +39,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
    {"line": 2.5, "tu": 1.75, "tb": 2.10} (если линии тоталов видны, перечисли их все; если нет — пустой список []).
 6. "scanned_handicaps": список объектов фор, где каждый объект имеет вид:
    {"h1_val": -1.0, "h2_val": 1.0, "h1": 2.05, "h2": 1.78} (если форы видны, перечисли их; если нет — пустой список []).
-7. "t1_form": список строк (символы 'В', 'Н' или 'П'), последние результаты первой команды. Если не видны — [].
-8. "t2_form": список строк (символы 'В', 'Н' или 'П'), последние результаты второй команды. Если не видны — [].
-9. "form_log": строка с отладочным комментарием по распознаванию.
 
 КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Не выдумывай и не подставляй коэффициенты «из головы», если они неразборчивы или отсутствуют на скриншоте. Если базовые коэффициенты (k_p1, k_x, k_p2) не удается достоверно считать, поля должны содержать null.
 """
@@ -52,7 +49,14 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     }
 
     try:
-        response = gemini_model.generate_content([prompt, image_part])
+        response = gemini_model.generate_content(
+            [prompt, image_part],
+            request_options={"timeout": 25.0}
+        )
+        
+        if not response or not response.text:
+            raise RuntimeError("Gemini вернул пустой ответ или сработал фильтр безопасности.")
+
         clean_text = response.text.strip()
         
         if clean_text.startswith("```"):
@@ -75,9 +79,6 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
         data.setdefault("scanned_totals", [])
         data.setdefault("scanned_handicaps", [])
-        data.setdefault("t1_form", [])
-        data.setdefault("t2_form", [])
-        data.setdefault("form_log", "<b>[DEBUG FORM]</b> Распознано через Gemini Vision API")
 
         return data
 
@@ -87,7 +88,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         raise RuntimeError(f"Ошибка считывания скриншота: {e}")
 
 
-def execute_v31_audit(data: dict) -> str:
+def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
     
     try:
@@ -114,24 +115,9 @@ def execute_v31_audit(data: dict) -> str:
         else:
             xG_total = 2.50
             
+        # Строгий детерминированный расчет xG по линии без искажений
         xG_1 = max(0.2, xG_total * (p1_norm / (p1_norm + p2_norm + 0.001)))
         xG_2 = max(0.2, xG_total - xG_1)
-
-        # ==========================================
-        # УРОВЕНЬ 1: Форма как коэффициент-множитель к xG
-        # ==========================================
-        t1_form = data.get("t1_form", [])
-        t2_form = data.get("t2_form", [])
-
-        t1_score = t1_form.count('В') - t1_form.count('П') if t1_form else 0
-        t2_score = t2_form.count('В') - t2_form.count('П') if t2_form else 0
-
-        # Корректирующие множители силы (ограничены коридором [0.90, 1.10])
-        t1_mult = max(0.90, min(1.10, 1.0 + (t1_score * 0.02)))
-        t2_mult = max(0.90, min(1.10, 1.0 + (t2_score * 0.02)))
-
-        xG_1 = max(0.2, xG_1 * t1_mult)
-        xG_2 = max(0.2, xG_2 * t2_mult)
 
     except ZeroDivisionError:
         xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
@@ -264,25 +250,13 @@ def execute_v31_audit(data: dict) -> str:
     if not cascade_passed:
         final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нарушен каскадный лимит матрицы Пуассона]"
     else:
-        # УРОВЕНЬ 2: Вето на команды в глубоком кризисе (катастрофический луз-стрик: >= 4 поражений из 5)
-        is_t1_crisis = t1_form.count('П') >= 4
-        is_t2_crisis = t2_form.count('П') >= 4
-
         for m in markets_to_test:
             odds = m["odds"]
-            
             if odds > 5.50 or odds < 1.85:
                 continue
-
             if vector_lock == "Низовой" and "Тотал больше" in m["name"]:
                 continue
             if vector_lock == "Верховой" and "Тотал меньше" in m["name"]:
-                continue
-
-            # Применение вето: исключаем рынки на пользу команд в кризисе
-            if is_t1_crisis and any(w in m["name"] for w in ["Победа 1 (П1)", "1X", "Фора 1"]):
-                continue
-            if is_t2_crisis and any(w in m["name"] for w in ["Победа 2 (П2)", "X2", "Фора 2"]):
                 continue
 
             real_prob = m["real_prob"]
@@ -305,72 +279,64 @@ def execute_v31_audit(data: dict) -> str:
                         final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ (ПЛАН Б)"
 
         if not best_pick:
-            final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков или сработал защитный фильтр вето/вектора]"
-
-    form_bonus = 0
-    if t1_form or t2_form:
-        t1_bonus_score = t1_form.count('В') - t1_form.count('П')
-        t2_bonus_score = t2_form.count('В') - t2_form.count('П')
-        form_bonus = (t1_bonus_score - t2_bonus_score) * 2
-
-    totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data.get("scanned_totals", [])]) if data.get("scanned_totals") else "Не найдены"
-    hc_str = ", ".join([f"Ф1({h['h1_val']:+.1f}):{h['h1']} / Ф2({h['h2_val']:+.1f}):{h['h2']}" for h in data.get("scanned_handicaps", [])]) if data.get("scanned_handicaps") else "Не найдены"
-    
-    t1_form_str = ", ".join(t1_form) if t1_form else "Не считывалась"
-    t2_form_str = ", ".join(t2_form) if t2_form else "Не считывалась"
+            final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков]"
 
     if best_pick:
         market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
-        confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2 + form_bonus)))
+        confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2)))
         stake_pct = 5 if confidence >= 80 else 3
     else:
         market_name, chosen_odds, r_prob, r_prob_min, imp_prob = "Отсутствует", 0.0, 0.0, 0.0, 0.0
         confidence = 0
         stake_pct = 0
 
-    report = f"""{data.get("form_log", "")}
+    # Короткий дефолтный вывод
+    if best_pick:
+        if chosen_odds >= 2.10:
+            short_line = f"🟢 <b>[СТАТУС: {final_status}]</b>\n\n{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%)"
+        else:
+            short_line = f"🟢 <b>[СТАТУС: {final_status}]</b>\n\n{t1} — {t2} | Альтернативная ставка по Плану Б: {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%)"
+    else:
+        short_line = f"🔴 <b>[СТАТУС: МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP)]</b>\n\n{t1} — {t2} | Матч пропущен по регламенту математической безопасности."
 
-<b>Шаг 0: Калибровка и привязка котировок (Gemini Vision)</b>
+    # Если запрошен full — возвращаем подробный отчет без слова "шаг"
+    if full_report:
+        totals_str = ", ".join([f"Т({t['line']}): М={t['tu']}/Б={t['tb']}" for t in data.get("scanned_totals", [])]) if data.get("scanned_totals") else "Не найдены"
+        hc_str = ", ".join([f"Ф1({h['h1_val']:+.1f}):{h['h1']} / Ф2({h['h2_val']:+.1f}):{h['h2']}" for h in data.get("scanned_handicaps", [])]) if data.get("scanned_handicaps") else "Не найдены"
+
+        full_text = f"""<b>Калибровка и привязка котировок</b>
 - <b>Матч</b>: {t1} — {t2}
 - <b>1X2</b>: П1={k1}, Х={kx}, П2={k2}
-- <b>Тоталы (все линии)</b>: [{totals_str}]
-- <b>Форы (все линии)</b>: [{hc_str}]
-- <b>Форма команд</b>: {t1} [{t1_form_str}] / {t2} [{t2_form_str}] (Бонус: {form_bonus:+d}%)
-- xG (с учетом множителя формы): {t1} ({xG_1:.2f}) / {t2} ({xG_2:.2f}) | Сумма: {xG_total:.2f}
+- <b>Тоталы</b>: [{totals_str}]
+- <b>Форы</b>: [{hc_str}]
+- xG (расчет по линии): {t1} ({xG_1:.2f}) / {t2} ({xG_2:.2f}) | Сумма: {xG_total:.2f}
 - Вектор матча: {vector_lock}
 
-<b>Шаг 1: Матрица Пуассона и каскадный контроль</b>
+<b>Матрица Пуассона и каскадный контроль</b>
 - ТОП-2 счетов: {top2_prob:.1f}% (Лимит &le; 46%)
 - ТОП-3 счетов: {top3_prob:.1f}% (Лимит &le; 62%)
 - ТОП-4 счетов: {top4_prob:.1f}% (Лимит &le; 72%)
 - Статус каскада: {"Пройдено успешно" if cascade_passed else "Нарушен лимит"}
 
-<b>Шаг 2 &amp; 3: Массив рынков и стресс-тест буфера (Динамический штраф)</b>
+<b>Массив рынков и стресс-тест буфера</b>
 - Проверен рынок: <b>{market_name}</b> (Коэф: {chosen_odds})
-- Real Prob: {r_prob:.1f}% | Real Prob(min с учетом динамического буфера): {r_prob_min:.1f}%
+- Real Prob: {r_prob:.1f}% | Real Prob(min): {r_prob_min:.1f}%
 - Implied Prob БК: {imp_prob:.1f}%
 
-<b>Шаг 4 &amp; 5: Уверенность и финансовый менеджмент</b>
+<b>Уверенность и финансовый менеджмент</b>
 - Индекс уверенности: {confidence}%
 - Рекомендуемый банк: {stake_pct}% от общего банка
-- Статус: [СТАТУС: {final_status}]
 
-<b>Шаг 6: ИТОГОВЫЙ ПРИКАЗ ПО СТАВКЕ</b>"""
+-----------------------------------
+{short_line}"""
+        return full_text
 
-    if best_pick:
-        if chosen_odds >= 2.10:
-            final_line = f"\n{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
-        else:
-            final_line = f"\n{t1} — {t2} | Альтернативная ставка по Плану Б: {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%) | [СТАТУС: {final_status}]"
-    else:
-        final_line = f"\n{t1} — {t2} | МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP)"
-
-    return report + final_line
+    return short_line
 
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.1 (Gemini Vision + Advanced Form Rules) запущен. Отправьте скриншот линии.")
+    bot.reply_to(message, "Аудитор v3.1 (Чистый детерминизм) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
 
 
 @bot.message_handler(content_types=['photo'])
@@ -380,8 +346,12 @@ def func_handle_photo(message):
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         
+        # Проверяем подпись к фотографии на наличие слова full
+        caption = message.caption.strip().lower() if message.caption else ""
+        show_full = "full" in caption or "полно" in caption
+
         parsed_data = parse_screenshot(downloaded_file)
-        result_verdict = execute_v31_audit(parsed_data)
+        result_verdict = execute_v31_audit(parsed_data, full_report=show_full)
         
         bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
     except Exception as e:
@@ -396,5 +366,5 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.1 (Gemini Vision + Fixed Model gemini-2.5-flash) успешно запущен...")
+    print("Бот v3.1 (Детерминизм + Режим Full) успешно запущен...")
     bot.infinity_polling()
