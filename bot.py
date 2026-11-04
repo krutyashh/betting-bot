@@ -43,7 +43,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 7. "scanned_team_totals": список объектов индивидуальных тоталов команд, если они видны на скриншоте, в виде:
    [{"team": 1, "line": 1.5, "it_under": 1.85, "it_over": 1.95}, ...] (если нет — пустой список []).
 8. "scanned_combos": список видимых на скриншоте комбинированных рынков (например, из блоков "Исход и тотал" или "Комбо") в виде:
-   [{"name": "П1 и ТБ(2.5)", "odds": 2.13}, {"name": "П1 и ТМ(2.5)", "odds": 6.00}, ...] (если нет — пустые списки).
+   [{"name": "П1 и ТБ(2.5)", "odds": 2.13}, {"name": "П1 и ТМ(2.5)", "odds": 4.80}, ...] (если нет — пустые списки).
 9. "btts_yes": число (float) или null — коэффициент на "Обе забьют — Да", если виден на скриншоте.
 10. "btts_no": число (float) или null — коэффициент на "Обе забьют — Нет", если виден на скриншоте.
 
@@ -163,6 +163,16 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         {"name": "X2", "odds": round(100.0 / max(0.1, sum(grid[i, j] for i in range(10) for j in range(10) if i <= j)) * 1.05, 2), "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i <= j)},
     ]
 
+    # Определяем вектор матча до обработки рынков
+    k_tu_check = k_tu25 if k_tu25 else 2.0
+    k_tb_check = k_tb25 if k_tb25 else 2.0
+    if k_tu_check < 1.75:
+        vector_lock = "Низовой"
+    elif k_tb_check < 1.75:
+        vector_lock = "Верховой"
+    else:
+        vector_lock = "Стандартный"
+
     # Тоталы со скриншота и дефолтные
     scanned_lines = {t["line"] for t in data.get("scanned_totals", [])}
     for t_item in data.get("scanned_totals", []):
@@ -214,7 +224,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         if h_item.get("h2"):
             markets_to_test.append({"name": f"Фора 2 ({h2_val:+.1f})", "odds": h_item["h2"], "real_prob": prob_h2})
 
-    # Добавление безопасных одиночных рынков: Индивидуальные тоталы и Обе забьют (по Пуассону)
+    # Индивидуальные тоталы и Обе забьют
     for it in data.get("scanned_team_totals", []):
         team_num = it.get("team")
         line = it.get("line")
@@ -233,7 +243,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             if it.get("it_over"):
                 markets_to_test.append({"name": f"ИТ2Б ({line})", "odds": it["it_over"], "real_prob": p_over})
 
-    # Обе забьют (ОЗ) расчет по Пуассону
     p_btts_yes = sum(grid[i, j] for i in range(1, 10) for j in range(1, 10))
     p_btts_no = 100.0 - p_btts_yes
     if data.get("btts_yes"):
@@ -241,14 +250,19 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     if data.get("btts_no"):
         markets_to_test.append({"name": "Обе забьют (Нет)", "odds": data["btts_no"], "real_prob": p_btts_no})
 
-    # СТРОГО ВИДИМЫЕ СО СКРИНА КОМБО-РЫНКИ (никаких синтетических формул!)
+    # СТРОГО ВИДИМЫЕ СО СКРИНА КОМБО-РЫНКИ С ЖЕСТКИМ ВЕКТОРНЫМ ФИЛЬТРОМ
     for combo in data.get("scanned_combos", []):
         c_name = combo.get("name")
         c_odds = combo.get("odds")
         if not c_name or not c_odds:
             continue
         
-        # Вычисляем реальную вероятность для поддерживаемых комбо-паттернов
+        # Защитный фильтр: если вектор матча "Верховой", запрещаем комбо с ТМ(2.5). Если "Низовой" — с ТБ(2.5).
+        if vector_lock == "Верховой" and "ТМ(2.5)" in c_name:
+            continue
+        if vector_lock == "Низовой" and "ТБ(2.5)" in c_name:
+            continue
+
         p_combo = 0.0
         if "П1" in c_name and "ТБ(2.5)" in c_name:
             p_combo = sum(grid[i, j] for i in range(10) for j in range(10) if i > j and (i + j) > 2.5)
@@ -270,21 +284,12 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    k_tu_check = k_tu25 if k_tu25 else 2.0
-    k_tb_check = k_tb25 if k_tb25 else 2.0
-    if k_tu_check < 1.75:
-        vector_lock = "Низовой"
-    elif k_tb_check < 1.75:
-        vector_lock = "Верховой"
-    else:
-        vector_lock = "Стандартный"
-
     if not cascade_passed:
         final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нарушен каскадный лимит матрицы Пуассона]"
     else:
         for m in markets_to_test:
             odds = m["odds"]
-            if odds > 5.50 or odds < 1.10: # расширили нижнюю границу для комбо вроде 1.28
+            if odds > 5.50 or odds < 1.10:
                 continue
             if vector_lock == "Низовой" and "Тотал больше" in m["name"]:
                 continue
@@ -366,7 +371,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.2 (Чистый детерминизм + Видимые комбо) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
+    bot.reply_to(message, "Аудитор v3.3 (Векторный фильтр комбо) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
 
 
 @bot.message_handler(content_types=['photo'])
@@ -395,5 +400,5 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.2 (Комбо со скриншота + ИТ/ОЗ) успешно запущен...")
+    print("Бот v3.3 (Векторный контроль комбо) успешно запущен...")
     bot.infinity_polling()
