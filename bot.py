@@ -124,16 +124,28 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         else:
             xG_total = 2.50
             
-        xG_1 = max(0.2, xG_total * (p1_norm / (p1_norm + p2_norm + 0.001)))
-        xG_2 = max(0.2, xG_total - xG_1)
+        # Улучшенная калибровка xG под доминирование фаворита по котировкам
+        if k1 < 1.50:
+            xG_total = max(2.8, xG_total)
+            xG_1 = xG_total * 0.72
+            xG_2 = xG_total * 0.28
+        elif k2 < 1.50:
+            xG_total = max(2.8, xG_total)
+            xG_2 = xG_total * 0.72
+            xG_1 = xG_total * 0.28
+        else:
+            xG_1 = max(0.2, xG_total * (p1_norm / (p1_norm + p2_norm + 0.001)))
+            xG_2 = max(0.2, xG_total - xG_1)
 
     except ZeroDivisionError:
         xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
 
-    grid = np.zeros((10, 10))
+    # Расширенная матрица Пуассона до 12x12 для учета редких разгромов
+    GRID_SIZE = 12
+    grid = np.zeros((GRID_SIZE, GRID_SIZE))
     score_probs = []
-    for i in range(10):
-        for j in range(10):
+    for i in range(GRID_SIZE):
+        for j in range(GRID_SIZE):
             prob = poisson.pmf(i, xG_1) * poisson.pmf(j, xG_2) * 100
             grid[i, j] = prob
             score_probs.append(((i, j), prob))
@@ -153,14 +165,17 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
     t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
 
+    # Динамический коэффициент маржи на основе реальной маржи матча (sum_1x2)
+    margin_mult = max(1.02, min(1.10, sum_1x2))
+
     markets_to_test = [
-        {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i > j)},
-        {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i == j)},
-        {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i < j)},
+        {"name": "Победа 1 (П1)", "odds": k1, "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j)},
+        {"name": "Ничья (Х)", "odds": kx, "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i == j)},
+        {"name": "Победа 2 (П2)", "odds": k2, "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i < j)},
         
-        {"name": "1X", "odds": round(100.0 / max(0.1, sum(grid[i, j] for i in range(10) for j in range(10) if i >= j)) * 1.05, 2), "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i >= j)},
-        {"name": "12", "odds": round(100.0 / max(0.1, sum(grid[i, j] for i in range(10) for j in range(10) if i != j)) * 1.05, 2), "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i != j)},
-        {"name": "X2", "odds": round(100.0 / max(0.1, sum(grid[i, j] for i in range(10) for j in range(10) if i <= j)) * 1.05, 2), "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if i <= j)},
+        {"name": "1X", "odds": round((100.0 / max(0.1, sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i >= j))) * margin_mult, 2), "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i >= j)},
+        {"name": "12", "odds": round((100.0 / max(0.1, sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i != j))) * margin_mult, 2), "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i != j)},
+        {"name": "X2", "odds": round((100.0 / max(0.1, sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i <= j))) * margin_mult, 2), "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i <= j)},
     ]
 
     # Определяем вектор матча до обработки рынков
@@ -180,46 +195,46 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         k_tu = t_item["tu"]
         k_tb = t_item["tb"]
         if k_tu:
-            markets_to_test.append({"name": f"Тотал меньше ({line})", "odds": k_tu, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) < line)})
+            markets_to_test.append({"name": f"Тотал меньше ({line})", "odds": k_tu, "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i + j) < line)})
         if k_tb:
-            markets_to_test.append({"name": f"Тотал больше ({line})", "odds": k_tb, "real_prob": sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) > line)})
+            markets_to_test.append({"name": f"Тотал больше ({line})", "odds": k_tb, "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i + j) > line)})
 
     for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
         if line not in scanned_lines:
-            p_tu = sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) < line)
-            p_tb = sum(grid[i, j] for i in range(10) for j in range(10) if (i + j) > line)
+            p_tu = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i + j) < line)
+            p_tb = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i + j) > line)
             if p_tu > 0:
-                markets_to_test.append({"name": f"Тотал меньше ({line})", "odds": round(100.0 / p_tu * 1.055, 2), "real_prob": p_tu})
+                markets_to_test.append({"name": f"Тотал меньше ({line})", "odds": round((100.0 / p_tu) * margin_mult, 2), "real_prob": p_tu})
             if p_tb > 0:
-                markets_to_test.append({"name": f"Тотал больше ({line})", "odds": round(100.0 / p_tb * 1.055, 2), "real_prob": p_tb})
+                markets_to_test.append({"name": f"Тотал больше ({line})", "odds": round((100.0 / p_tb) * margin_mult, 2), "real_prob": p_tb})
 
-    # Форы со скриншота
+    # Форы со скриншота (Исправленный корректный расчет с учетом возвратов)
     for h_item in data.get("scanned_handicaps", []):
         h1_val = h_item["h1_val"]
         h2_val = h_item["h2_val"]
         
         if h1_val == 0.0:
-            prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if i > j) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
+            prob_h1 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j) + (sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i == j) * 0.5)
         elif float(h1_val).is_integer():
             h_int = int(h1_val)
-            prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h_int)
-            prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) == -h_int)
+            prob_win = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) > h_int if h_int < 0 else (i - j) > -h_int)
+            prob_push = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) == h_int if h_int < 0 else (i - j) == -h_int)
             prob_h1 = prob_win + (prob_push * 0.5)
         else:
-            prob_h1 = sum(grid[i, j] for i in range(10) for j in range(10) if (i - j) > -h1_val)
+            prob_h1 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) > -h1_val)
 
         if h_item.get("h1"):
             markets_to_test.append({"name": f"Фора 1 ({h1_val:+.1f})", "odds": h_item["h1"], "real_prob": prob_h1})
 
         if h2_val == 0.0:
-            prob_h2 = sum(grid[i, j] for i in range(10) for j in range(10) if j > i) + (sum(grid[i, j] for i in range(10) for j in range(10) if i == j) * 0.5)
+            prob_h2 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if j > i) + (sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i == j) * 0.5)
         elif float(h2_val).is_integer():
             h_int = int(h2_val)
-            prob_win = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > -h_int)
-            prob_push = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) == -h_int)
+            prob_win = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) > h_int if h_int < 0 else (j - i) > -h_int)
+            prob_push = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) == h_int if h_int < 0 else (j - i) == -h_int)
             prob_h2 = prob_win + (prob_push * 0.5)
         else:
-            prob_h2 = sum(grid[i, j] for i in range(10) for j in range(10) if (j - i) > -h2_val)
+            prob_h2 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) > -h2_val)
 
         if h_item.get("h2"):
             markets_to_test.append({"name": f"Фора 2 ({h2_val:+.1f})", "odds": h_item["h2"], "real_prob": prob_h2})
@@ -229,21 +244,21 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         team_num = it.get("team")
         line = it.get("line")
         if team_num == 1:
-            p_under = sum(grid[i, j] for i in range(10) for j in range(10) if i < line)
-            p_over = sum(grid[i, j] for i in range(10) for j in range(10) if i > line)
+            p_under = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i < line)
+            p_over = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > line)
             if it.get("it_under"):
                 markets_to_test.append({"name": f"ИТ1М ({line})", "odds": it["it_under"], "real_prob": p_under})
             if it.get("it_over"):
                 markets_to_test.append({"name": f"ИТ1Б ({line})", "odds": it["it_over"], "real_prob": p_over})
         elif team_num == 2:
-            p_under = sum(grid[i, j] for i in range(10) for j in range(10) if j < line)
-            p_over = sum(grid[i, j] for i in range(10) for j in range(10) if j > line)
+            p_under = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if j < line)
+            p_over = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if j > line)
             if it.get("it_under"):
                 markets_to_test.append({"name": f"ИТ2М ({line})", "odds": it["it_under"], "real_prob": p_under})
             if it.get("it_over"):
                 markets_to_test.append({"name": f"ИТ2Б ({line})", "odds": it["it_over"], "real_prob": p_over})
 
-    p_btts_yes = sum(grid[i, j] for i in range(1, 10) for j in range(1, 10))
+    p_btts_yes = sum(grid[i, j] for i in range(1, GRID_SIZE) for j in range(1, GRID_SIZE))
     p_btts_no = 100.0 - p_btts_yes
     if data.get("btts_yes"):
         markets_to_test.append({"name": "Обе забьют (Да)", "odds": data["btts_yes"], "real_prob": p_btts_yes})
@@ -265,13 +280,13 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
         p_combo = 0.0
         if "П1" in c_name and "ТБ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(10) for j in range(10) if i > j and (i + j) > 2.5)
+            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j and (i + j) > 2.5)
         elif "П1" in c_name and "ТМ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(10) for j in range(10) if i > j and (i + j) < 2.5)
+            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j and (i + j) < 2.5)
         elif "П2" in c_name and "ТБ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(10) for j in range(10) if i < j and (i + j) > 2.5)
+            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i < j and (i + j) > 2.5)
         elif "П2" in c_name and "ТМ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(10) for j in range(10) if i < j and (i + j) < 2.5)
+            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i < j and (i + j) < 2.5)
         
         if p_combo > 0:
             markets_to_test.append({
@@ -297,7 +312,8 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
                 continue
 
             real_prob = m["real_prob"]
-            dynamic_penalty = max(1.5, min(4.5, (100 - real_prob) * 0.04))
+            # Усиленный динамический штраф для глубоких минусовых фор и высоких кэф
+            dynamic_penalty = max(2.0, min(6.0, (100 - real_prob) * 0.08))
             real_prob_min = real_prob - dynamic_penalty
             implied_prob = (1 / odds) * 100
             
@@ -371,7 +387,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.3 (Векторный фильтр комбо) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
+    bot.reply_to(message, "Аудитор v3.5 (Динамическая маржа, сетка 12x12) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
 
 
 @bot.message_handler(content_types=['photo'])
@@ -400,5 +416,5 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.3 (Векторный контроль комбо) успешно запущен...")
+    print("Бот v3.5 успешно запущен...")
     bot.infinity_polling()
