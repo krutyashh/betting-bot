@@ -340,13 +340,16 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             
             if odds >= 2.10:
                 vm_min = real_prob_min - implied_prob
-                # Динамический порог валуя зависит от высоты кэфа
                 required_vm = 1.50 + (odds - 2.10) * 0.5
                 if vm_min >= required_vm and vm_min > max_margin_val:
                     max_margin_val = vm_min
                     best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
                     final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
             else:
+                # ПЛАН Б: Фильтр по минимальному коэффициенту (поднят до 1.45)
+                if odds < 1.45:
+                    continue
+
                 if real_prob_min > (implied_prob + 6.0):
                     excess = real_prob_min - (implied_prob + 6.0)
                     if excess > max_margin_val:
@@ -366,7 +369,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         
         if b_val > 0:
             kelly_fraction = (p_win * chosen_odds - 1.0) / b_val
-            raw_stake = kelly_fraction * 40.0 # Мягкий коэффициент перевода в проценты
+            raw_stake = kelly_fraction * 40.0
         else:
             raw_stake = 3.0
 
@@ -425,7 +428,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.7 (Защита от галлюцинаций, Келли до 10%) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
+    bot.reply_to(message, "Аудитор v3.9 (План Б от 1.45, Келли до 10%) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
 
 
 @bot.message_handler(content_types=['photo'])
@@ -454,5 +457,5 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.7 успешно запущен...")
+    print("Бот v3.9 успешно запущен...")
     bot.infinity_polling()
