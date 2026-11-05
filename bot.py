@@ -12,9 +12,14 @@ import google.generativeai as genai
 warnings.filterwarnings("ignore", category=UserWarning)
 
 TOKEN = os.getenv('BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("Не задана переменная окружения BOT_TOKEN")
+
 bot = telebot.TeleBot(TOKEN)
 
 GEMINI_KEY = os.getenv('GEMINI_KEY')
+if not GEMINI_KEY:
+    raise ValueError("Не задана переменная окружения GEMINI_KEY")
 
 # Инициализация Gemini API с актуальной моделью gemini-3.8-flash
 genai.configure(api_key=GEMINI_KEY)
@@ -124,7 +129,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         else:
             xG_total = 2.50
             
-        # Улучшенная калибровка xG под доминирование фаворита по котировкам
         if k1 < 1.50:
             xG_total = max(2.8, xG_total)
             xG_1 = xG_total * 0.72
@@ -140,7 +144,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     except ZeroDivisionError:
         xG_total, xG_1, xG_2 = 2.50, 1.25, 1.25
 
-    # Расширенная матрица Пуассона до 12x12 для учета редких разгромов
     GRID_SIZE = 12
     grid = np.zeros((GRID_SIZE, GRID_SIZE))
     score_probs = []
@@ -165,7 +168,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
     t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
 
-    # Динамический коэффициент маржи на основе реальной маржи матча (sum_1x2)
     margin_mult = max(1.02, min(1.10, sum_1x2))
 
     markets_to_test = [
@@ -178,7 +180,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         {"name": "X2", "odds": round((100.0 / max(0.1, sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i <= j))) * margin_mult, 2), "real_prob": sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i <= j)},
     ]
 
-    # Определяем вектор матча до обработки рынков
     k_tu_check = k_tu25 if k_tu25 else 2.0
     k_tb_check = k_tb25 if k_tb25 else 2.0
     if k_tu_check < 1.75:
@@ -188,7 +189,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     else:
         vector_lock = "Стандартный"
 
-    # Тоталы со скриншота и дефолтные
     scanned_lines = {t["line"] for t in data.get("scanned_totals", [])}
     for t_item in data.get("scanned_totals", []):
         line = t_item["line"]
@@ -208,18 +208,23 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             if p_tb > 0:
                 markets_to_test.append({"name": f"Тотал больше ({line})", "odds": round((100.0 / p_tb) * margin_mult, 2), "real_prob": p_tb})
 
-    # Форы со скриншота (Исправленный корректный расчет с учетом возвратов)
+    # Четкий и безопасный расчет фор без скрытых синтаксических ошибок
     for h_item in data.get("scanned_handicaps", []):
         h1_val = h_item["h1_val"]
         h2_val = h_item["h2_val"]
         
         if h1_val == 0.0:
-            prob_h1 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j) + (sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i == j) * 0.5)
+            prob_h1 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j) + \
+                      (sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i == j) * 0.5)
         elif float(h1_val).is_integer():
             h_int = int(h1_val)
-            prob_win = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) > h_int if h_int < 0 else (i - j) > -h_int)
-            prob_push = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) == h_int if h_int < 0 else (i - j) == -h_int)
-            prob_h1 = prob_win + (prob_push * 0.5)
+            if h_int < 0:
+                target_diff = abs(h_int)
+                prob_win = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) > target_diff)
+                prob_push = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) == target_diff)
+                prob_h1 = prob_win + (prob_push * 0.5)
+            else:
+                prob_h1 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) > -h_int)
         else:
             prob_h1 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (i - j) > -h1_val)
 
@@ -227,19 +232,23 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             markets_to_test.append({"name": f"Фора 1 ({h1_val:+.1f})", "odds": h_item["h1"], "real_prob": prob_h1})
 
         if h2_val == 0.0:
-            prob_h2 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if j > i) + (sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i == j) * 0.5)
+            prob_h2 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if j > i) + \
+                      (sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i == j) * 0.5)
         elif float(h2_val).is_integer():
             h_int = int(h2_val)
-            prob_win = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) > h_int if h_int < 0 else (j - i) > -h_int)
-            prob_push = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) == h_int if h_int < 0 else (j - i) == -h_int)
-            prob_h2 = prob_win + (prob_push * 0.5)
+            if h_int < 0:
+                target_diff = abs(h_int)
+                prob_win = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) > target_diff)
+                prob_push = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) == target_diff)
+                prob_h2 = prob_win + (prob_push * 0.5)
+            else:
+                prob_h2 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) > -h_int)
         else:
             prob_h2 = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if (j - i) > -h2_val)
 
         if h_item.get("h2"):
             markets_to_test.append({"name": f"Фора 2 ({h2_val:+.1f})", "odds": h_item["h2"], "real_prob": prob_h2})
 
-    # Индивидуальные тоталы и Обе забьют
     for it in data.get("scanned_team_totals", []):
         team_num = it.get("team")
         line = it.get("line")
@@ -265,14 +274,12 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     if data.get("btts_no"):
         markets_to_test.append({"name": "Обе забьют (Нет)", "odds": data["btts_no"], "real_prob": p_btts_no})
 
-    # СТРОГО ВИДИМЫЕ СО СКРИНА КОМБО-РЫНКИ С ЖЕСТКИМ ВЕКТОРНЫМ ФИЛЬТРОМ
     for combo in data.get("scanned_combos", []):
         c_name = combo.get("name")
         c_odds = combo.get("odds")
         if not c_name or not c_odds:
             continue
         
-        # Защитный фильтр: если вектор матча "Верховой", запрещаем комбо с ТМ(2.5). Если "Низовой" — с ТБ(2.5).
         if vector_lock == "Верховой" and "ТМ(2.5)" in c_name:
             continue
         if vector_lock == "Низовой" and "ТБ(2.5)" in c_name:
@@ -312,7 +319,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
                 continue
 
             real_prob = m["real_prob"]
-            # Усиленный динамический штраф для глубоких минусовых фор и высоких кэф
             dynamic_penalty = max(2.0, min(6.0, (100 - real_prob) * 0.08))
             real_prob_min = real_prob - dynamic_penalty
             implied_prob = (1 / odds) * 100
