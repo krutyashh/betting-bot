@@ -31,6 +31,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
     """
     Отправляет скриншот в Gemini для извлечения базовых линий, тоталов, фор, 
     а также видимых на скриншоте комбо-рынков и индивидуальных тоталов.
+    Включает защиту от галлюцинаций (проверку маржи 1X2).
     """
     prompt = """
 Ты — профессиональный спортивный аналитик и строгий парсер букмекерских линий.
@@ -88,6 +89,14 @@ def parse_screenshot(image_bytes: bytes) -> dict:
                 "Не удалось достоверно считать обязательные данные с изображения "
                 "(название матча или основные коэффициенты 1X2 отсутствуют/нечитаемы)."
             )
+
+        # ЗАЩИТА ОТ ГАЛЛЮЦИНАЦИЙ: Проверка адекватности маржи 1X2
+        try:
+            margin_check = (1 / k1) + (1 / kx) + (1 / k2)
+            if not (1.01 <= margin_check <= 1.20):
+                raise ValueError(f"Аномальная маржа 1X2 ({margin_check:.3f}). Коэффициенты считаны с ошибкой.")
+        except ZeroDivisionError:
+            raise ValueError("Нулевые или некорректные коэффициенты в блоке 1X2.")
 
         data.setdefault("scanned_totals", [])
         data.setdefault("scanned_handicaps", [])
@@ -208,7 +217,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             if p_tb > 0:
                 markets_to_test.append({"name": f"Тотал больше ({line})", "odds": round((100.0 / p_tb) * margin_mult, 2), "real_prob": p_tb})
 
-    # Четкий и безопасный расчет фор без скрытых синтаксических ошибок
     for h_item in data.get("scanned_handicaps", []):
         h1_val = h_item["h1_val"]
         h2_val = h_item["h2_val"]
@@ -318,6 +326,13 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             if vector_lock == "Верховой" and "Тотал меньше" in m["name"]:
                 continue
 
+            # СТРОГИЙ КОМБИНИРОВАННЫЙ ФИЛЬТР ДЛЯ ПЛЮСОВЫХ ФОР (+1.5, +2.5 и т.д.)
+            if "Фора" in m["name"] and "+" in m["name"]:
+                if not (1.85 <= odds <= 2.80):
+                    continue
+                if xG_total > 3.4:
+                    continue
+
             real_prob = m["real_prob"]
             dynamic_penalty = max(2.0, min(6.0, (100 - real_prob) * 0.08))
             real_prob_min = real_prob - dynamic_penalty
@@ -325,7 +340,9 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             
             if odds >= 2.10:
                 vm_min = real_prob_min - implied_prob
-                if vm_min >= 1.50 and vm_min > max_margin_val:
+                # Динамический порог валуя зависит от высоты кэфа
+                required_vm = 1.50 + (odds - 2.10) * 0.5
+                if vm_min >= required_vm and vm_min > max_margin_val:
                     max_margin_val = vm_min
                     best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
                     final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
@@ -340,10 +357,25 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         if not best_pick:
             final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков]"
 
+    # БАНКРОЛЛ-МЕНЕДЖМЕНТ ПО КРИТЕРИЮ КЕЛЛИ С ЛИМИТОМ ДО 10%
     if best_pick:
         market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
-        confidence = min(95, max(60, int(75 + (max_margin_val if max_margin_val > 0 else val_score) * 2)))
-        stake_pct = 5 if confidence >= 80 else 3
+        
+        p_win = r_prob_min / 100.0
+        b_val = chosen_odds - 1.0
+        
+        if b_val > 0:
+            kelly_fraction = (p_win * chosen_odds - 1.0) / b_val
+            raw_stake = kelly_fraction * 40.0 # Мягкий коэффициент перевода в проценты
+        else:
+            raw_stake = 3.0
+
+        if final_status.startswith("ЖЕЛЕЗНЫЙ"):
+            stake_pct = min(10, max(5, int(raw_stake)))
+            confidence = min(95, max(85, int(75 + val_score * 2)))
+        else:
+            stake_pct = min(6, max(3, int(raw_stake)))
+            confidence = min(84, max(70, int(70 + val_score * 1.5)))
     else:
         market_name, chosen_odds, r_prob, r_prob_min, imp_prob = "Отсутствует", 0.0, 0.0, 0.0, 0.0
         confidence = 0
@@ -380,7 +412,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 - Real Prob: {r_prob:.1f}% | Real Prob(min): {r_prob_min:.1f}%
 - Implied Prob БК: {imp_prob:.1f}%
 
-<b>Уверенность и финансовый менеджмент</b>
+<b>Уверенность и финансовый менеджмент (Келли)</b>
 - Индекс уверенности: {confidence}%
 - Рекомендуемый банк: {stake_pct}% от общего банка
 
@@ -393,7 +425,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.5 (Динамическая маржа, сетка 12x12) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
+    bot.reply_to(message, "Аудитор v3.7 (Защита от галлюцинаций, Келли до 10%) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
 
 
 @bot.message_handler(content_types=['photo'])
@@ -401,12 +433,12 @@ def func_handle_photo(message):
     processing_msg = bot.reply_to(message, "🛡️ Анализируем скриншот через Gemini Flash...")
     try:
         file_info = bot.get_file(message.photo[-1].file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        download_file = bot.download_file(file_info.file_path)
         
         caption = message.caption.strip().lower() if message.caption else ""
         show_full = "full" in caption or "полно" in caption
 
-        parsed_data = parse_screenshot(downloaded_file)
+        parsed_data = parse_screenshot(download_file)
         result_verdict = execute_v31_audit(parsed_data, full_report=show_full)
         
         bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
@@ -422,5 +454,5 @@ def func_handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Бот v3.5 успешно запущен...")
+    print("Бот v3.7 успешно запущен...")
     bot.infinity_polling()
