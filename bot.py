@@ -30,7 +30,7 @@ print("Gemini API успешно инициализирован с модель�
 def parse_screenshot(image_bytes: bytes) -> dict:
     """
     Отправляет скриншот в Gemini для извлечения базовых линий, тоталов, фор, 
-    а также видимых на скриншоте комбо-рынков и индивидуальных тоталов.
+    турнира, а также видимых на скриншоте комбо-рынков и индивидуальных тоталов.
     Включает защиту от галлюцинаций (проверку маржи 1X2).
     """
     prompt = """
@@ -39,21 +39,22 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
 Внимательно изучи изображение и заполни следующие поля:
 1. "match": строка, точное название матча в формате "Команда 1 — Команда 2" (если названия не видны, укажи null).
-2. "k_p1": число (float), коэффициент на победу первой команды (П1). Если его нет, строго укажи null.
-3. "k_x": число (float), коэффициент на ничью (Х). Если его нет, строго укажи null.
-4. "k_p2": число (float), коэффициент на победу второй команды (П2). Если его нет, строго укажи null.
-5. "scanned_totals": список объектов тоталов, где каждый объект имеет вид:
+2. "tournament": строка, точное название лиги или турнира, указанное на скриншоте (например, "Футбол, Беларусь, Высшая лига", "Молодежная Лига", "Кубок"). Если не видно, null.
+3. "k_p1": число (float), коэффициент на победу первой команды (П1). Если его нет, строго укажи null.
+4. "k_x": число (float), коэффициент на ничью (Х). Если его нет, строго укажи null.
+5. "k_p2": число (float), коэффициент на победу второй команды (П2). Если его нет, строго укажи null.
+6. "scanned_totals": список объектов тоталов, где каждый объект имеет вид:
    {"line": 2.5, "tu": 1.75, "tb": 2.10} (если линии тоталов видны, перечисли их все; если нет — пустой список []).
-6. "scanned_handicaps": список объектов фор, где каждый объект имеет вид:
+7. "scanned_handicaps": список объектов фор, где каждый объект имеет вид:
    {"h1_val": -1.0, "h2_val": 1.0, "h1": 2.05, "h2": 1.78} (если форы видны, перечисли их; если нет — пустой список []).
-7. "scanned_team_totals": список объектов индивидуальных тоталов команд, если они видны на скриншоте, в виде:
+8. "scanned_team_totals": список объектов индивидуальных тоталов команд, если они видны на скриншоте, в виде:
    [{"team": 1, "line": 1.5, "it_under": 1.85, "it_over": 1.95}, ...] (если нет — пустой список []).
-8. "scanned_combos": список видимых на скриншоте комбинированных рынков (например, из блоков "Исход и тотал" или "Комбо") в виде:
+9. "scanned_combos": список видимых на скриншоте комбинированных рынков в виде:
    [{"name": "П1 и ТБ(2.5)", "odds": 2.13}, {"name": "П1 и ТМ(2.5)", "odds": 4.80}, ...] (если нет — пустые списки).
-9. "btts_yes": число (float) или null — коэффициент на "Обе забьют — Да", если виден на скриншоте.
-10. "btts_no": число (float) или null — коэффициент на "Обе забьют — Нет", если виден на скриншоте.
+10. "btts_yes": число (float) или null — коэффициент на "Обе забьют — Да".
+11. "btts_no": число (float) или null — коэффициент на "Обе забьют — Нет".
 
-КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Никогда не придумывай коэффициенты «из головы». Бери строго то, что реально видишь на изображении. Если базовые коэффициенты (k_p1, k_x, k_p2) не удается достоверно считать, поля должны содержать null.
+КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Никогда не придумывай коэффициенты «из головы». Бери строго то, что реально видишь на изображении.
 """
 
     image_part = {
@@ -102,6 +103,7 @@ def parse_screenshot(image_bytes: bytes) -> dict:
         data.setdefault("scanned_handicaps", [])
         data.setdefault("scanned_team_totals", [])
         data.setdefault("scanned_combos", [])
+        data.setdefault("tournament", "")
 
         return data
 
@@ -113,7 +115,16 @@ def parse_screenshot(image_bytes: bytes) -> dict:
 
 def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     k1, kx, k2 = data["k_p1"], data["k_x"], data["k_p2"]
+    tournament_name = data.get("tournament", "")
     
+    # 🛡️ АВТОМАТИЧЕСКИЙ ФИЛЬТР ЛИГ (Отсекаем кубки, молодежки, товарищеские)
+    forbidden_keywords = ["кубок", "cup", "мол", "youth", "товарищеский", "friendly", "дубл"]
+    is_forbidden_league = any(kw in tournament_name.lower() for kw in forbidden_keywords)
+
+    teams = re.split(r'\s+[-—–]\s+', data['match'])
+    t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
+    t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
+
     try:
         implied_p1 = 1 / k1
         implied_kx = 1 / kx
@@ -172,10 +183,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
     cascade_passed = (top2_prob <= 46.0) and (top3_prob <= 62.0) and (top4_prob <= 72.0) and (tail_prob >= 28.0)
     if 69.0 <= top4_prob <= 72.0 and (top4_prob + 3.0) > 72.0:
         cascade_passed = False
-
-    teams = re.split(r'\s+[-—–]\s+', data['match'])
-    t1 = teams[0].strip() if len(teams) > 0 and teams[0] else "Команда 1"
-    t2 = teams[1].strip() if len(teams) > 1 and teams[1] else "Команда 2"
 
     margin_mult = max(1.02, min(1.10, sum_1x2))
 
@@ -257,64 +264,13 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         if h_item.get("h2"):
             markets_to_test.append({"name": f"Фора 2 ({h2_val:+.1f})", "odds": h_item["h2"], "real_prob": prob_h2})
 
-    for it in data.get("scanned_team_totals", []):
-        team_num = it.get("team")
-        line = it.get("line")
-        if team_num == 1:
-            p_under = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i < line)
-            p_over = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > line)
-            if it.get("it_under"):
-                markets_to_test.append({"name": f"ИТ1М ({line})", "odds": it["it_under"], "real_prob": p_under})
-            if it.get("it_over"):
-                markets_to_test.append({"name": f"ИТ1Б ({line})", "odds": it["it_over"], "real_prob": p_over})
-        elif team_num == 2:
-            p_under = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if j < line)
-            p_over = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if j > line)
-            if it.get("it_under"):
-                markets_to_test.append({"name": f"ИТ2М ({line})", "odds": it["it_under"], "real_prob": p_under})
-            if it.get("it_over"):
-                markets_to_test.append({"name": f"ИТ2Б ({line})", "odds": it["it_over"], "real_prob": p_over})
-
-    p_btts_yes = sum(grid[i, j] for i in range(1, GRID_SIZE) for j in range(1, GRID_SIZE))
-    p_btts_no = 100.0 - p_btts_yes
-    if data.get("btts_yes"):
-        markets_to_test.append({"name": "Обе забьют (Да)", "odds": data["btts_yes"], "real_prob": p_btts_yes})
-    if data.get("btts_no"):
-        markets_to_test.append({"name": "Обе забьют (Нет)", "odds": data["btts_no"], "real_prob": p_btts_no})
-
-    for combo in data.get("scanned_combos", []):
-        c_name = combo.get("name")
-        c_odds = combo.get("odds")
-        if not c_name or not c_odds:
-            continue
-        
-        if vector_lock == "Верховой" and "ТМ(2.5)" in c_name:
-            continue
-        if vector_lock == "Низовой" and "ТБ(2.5)" in c_name:
-            continue
-
-        p_combo = 0.0
-        if "П1" in c_name and "ТБ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j and (i + j) > 2.5)
-        elif "П1" in c_name and "ТМ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i > j and (i + j) < 2.5)
-        elif "П2" in c_name and "ТБ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i < j and (i + j) > 2.5)
-        elif "П2" in c_name and "ТМ(2.5)" in c_name:
-            p_combo = sum(grid[i, j] for i in range(GRID_SIZE) for j in range(GRID_SIZE) if i < j and (i + j) < 2.5)
-        
-        if p_combo > 0:
-            markets_to_test.append({
-                "name": c_name,
-                "odds": c_odds,
-                "real_prob": p_combo
-            })
-
     best_pick = None
     max_margin_val = -999.0
     final_status = "РАБОЧИЙ ВАЛУЙ"
 
-    if not cascade_passed:
+    if is_forbidden_league:
+        final_status = f"МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Фильтр лиг: {tournament_name}]"
+    elif not cascade_passed:
         final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нарушен каскадный лимит матрицы Пуассона]"
     else:
         for m in markets_to_test:
@@ -326,7 +282,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
             if vector_lock == "Верховой" and "Тотал меньше" in m["name"]:
                 continue
 
-            # СТРОГИЙ КОМБИНИРОВАННЫЙ ФИЛЬТР ДЛЯ ПЛЮСОВЫХ ФОР (+1.5, +2.5 и т.д.)
             if "Фора" in m["name"] and "+" in m["name"]:
                 if not (1.85 <= odds <= 2.80):
                     continue
@@ -346,7 +301,6 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
                     best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
                     final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
             else:
-                # ПЛАН Б: Фильтр по минимальному коэффициенту (от 1.45)
                 if odds < 1.45:
                     continue
 
@@ -357,11 +311,10 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
                         best_pick = (m["name"], odds, real_prob_min, real_prob, real_prob_min, implied_prob)
                         final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ (ПЛАН Б)"
 
-        if not best_pick:
+        if not best_pick and not is_forbidden_league:
             final_status = "МАТЧ РЕКОМЕНДОВАН К ПРОПУСКУ (SKIP) [Нет подтвержденного валуя по всему массиву рынков]"
 
-    # БАНКРОЛЛ-МЕНЕДЖМЕНТ ПО КРИТЕРИЮ КЕЛЛИ С ЛИМИТОМ ДО 10%
-    if best_pick:
+    if best_pick and not is_forbidden_league:
         market_name, chosen_odds, val_score, r_prob, r_prob_min, imp_prob = best_pick
         
         p_win = r_prob_min / 100.0
@@ -384,7 +337,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
         confidence = 0
         stake_pct = 0
 
-    if best_pick:
+    if best_pick and not is_forbidden_league:
         if chosen_odds >= 2.10:
             short_line = f"🟢 <b>[СТАТУС: {final_status}]</b>\n\n{t1} — {t2} | {market_name} — {chosen_odds:.2f} — {stake_pct}% от банка (Уверенность: {confidence}%)"
         else:
@@ -398,6 +351,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
         full_text = f"""<b>Калибровка и привязка котировок</b>
 - <b>Матч</b>: {t1} — {t2}
+- <b>Турнир</b>: {tournament_name or 'Не указан'}
 - <b>1X2</b>: П1={k1}, Х={kx}, П2={k2}
 - <b>Тоталы</b>: [{totals_str}]
 - <b>Форы</b>: [{hc_str}]
@@ -428,12 +382,11 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.12 (Интерфейс принятого скрина + Громкая ошибка) запущен. Отправьте скриншот линии.")
+    bot.reply_to(message, "Аудитор v3.12 (С фильтром лиг и защитой от молодежек) запущен. Отправьте скриншот линии.")
 
 
 @bot.message_handler(content_types=['photo'])
 def func_handle_photo(message):
-    # 1. Сразу отправляем промежуточное сообщение в чат, чтобы вы видели, что скрин принят в обработку
     processing_msg = bot.reply_to(message, "🛡️ Анализируем скриншот через Gemini Flash...")
     try:
         file_info = bot.get_file(message.photo[-1].file_id)
@@ -445,11 +398,8 @@ def func_handle_photo(message):
         parsed_data = parse_screenshot(download_file)
         result_verdict = execute_v31_audit(parsed_data, full_report=show_full)
         
-        # 2. Редактируем промежуточное сообщение на результат. 
-        # Если это обычный матч/пропуск — сообщение просто обновится в чате без громкого пуша в шторку.
         bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
 
-        # 3. Если найден валуй (зеленый статус), закрепляем это сообщение в чате
         if "🟢" in result_verdict:
             try:
                 bot.pin_chat_message(chat_id=message.chat.id, message_id=processing_msg.message_id)
@@ -463,7 +413,6 @@ def func_handle_photo(message):
         if len(safe_tb) > 3500:
             safe_tb = safe_tb[:3500] + "\n...[обрезано]"
             
-        # 4. ОБЯЗАТЕЛЬНОЕ УВЕДОМЛЕНИЕ ОБ ОШИБКЕ: если бот сломался/отказал, вы гарантированно увидите это в чате
         error_message = f"❌ <b>Ошибка аудита:</b>\n<pre>{safe_tb}</pre>"
         try:
             bot.edit_message_text(error_message, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
