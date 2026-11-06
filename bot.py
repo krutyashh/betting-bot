@@ -346,7 +346,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
                     best_pick = (m["name"], odds, vm_min, real_prob, real_prob_min, implied_prob)
                     final_status = "ЖЕЛЕЗНЫЙ ВАЛУЙ" if vm_min >= 6.0 else "РАБОЧИЙ ВАЛУЙ"
             else:
-                # ПЛАН Б: Фильтр по минимальному коэффициенту (поднят до 1.45)
+                # ПЛАН Б: Фильтр по минимальному коэффициенту (от 1.45)
                 if odds < 1.45:
                     continue
 
@@ -428,7 +428,7 @@ def execute_v31_audit(data: dict, full_report: bool = False) -> str:
 
 @bot.message_handler(commands=['start'])
 def func_start(message):
-    bot.reply_to(message, "Аудитор v3.9 (План Б от 1.45, Келли до 10%) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
+    bot.reply_to(message, "Аудитор v3.10 (План Б от 1.45, Уведомления + Автозакреп) запущен. Отправьте скриншот линии (с текстом full для полного отчета).")
 
 
 @bot.message_handler(content_types=['photo'])
@@ -444,7 +444,22 @@ def func_handle_photo(message):
         parsed_data = parse_screenshot(download_file)
         result_verdict = execute_v31_audit(parsed_data, full_report=show_full)
         
-        bot.edit_message_text(result_verdict, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
+        # Удаляем старое сообщение «Анализируем...» для гарантированного пуша
+        try:
+            bot.delete_message(chat_id=message.chat.id, message_id=processing_msg.message_id)
+        except Exception:
+            pass
+
+        # Отправляем новое сообщение с результатами аудита
+        sent_msg = bot.send_message(chat_id=message.chat.id, text=result_verdict, parse_mode='HTML')
+
+        # Если найдена валуйная ставка (зеленый статус), закрепляем её в чате
+        if "🟢" in result_verdict:
+            try:
+                bot.pin_chat_message(chat_id=message.chat.id, message_id=sent_msg.message_id)
+            except Exception as pin_err:
+                print(f"Не удалось закрепить сообщение (проверьте права админа): {pin_err}")
+
     except Exception as e:
         tb_str = traceback.format_exc()
         safe_tb = tb_str.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -453,9 +468,12 @@ def func_handle_photo(message):
             safe_tb = safe_tb[:3500] + "\n...[обрезано]"
             
         error_message = f"❌ <b>Ошибка аудита:</b>\n<pre>{safe_tb}</pre>"
-        bot.edit_message_text(error_message, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
+        try:
+            bot.edit_message_text(error_message, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='HTML')
+        except Exception:
+            bot.send_message(chat_id=message.chat.id, text=error_message, parse_mode='HTML')
 
 
 if __name__ == "__main__":
-    print("Бот v3.9 успешно запущен...")
+    print("Бот v3.10 успешно запущен...")
     bot.infinity_polling()
